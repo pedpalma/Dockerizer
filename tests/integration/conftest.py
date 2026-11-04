@@ -4,7 +4,7 @@ Cada teste usa um projeto com nome único (``dzit-<hex>``). Ao final, **mesmo se
 falhar**, todos os recursos daquele projeto Compose são removidos — e somente eles: o filtro
 usa o label de projeto exclusivo do teste. Nada global (prune) é executado.
 
-Rodar: ``uv run pytest -m docker`` (exige Docker com Compose ≥ 2.24 e acesso à rede para
+Rodar: ``uv run pytest -m docker`` (exige Docker com Compose ≥ 2.24 — ``MIN_COMPOSE_VERSION`` — e acesso à rede para
 baixar imagens e dependências).
 """
 

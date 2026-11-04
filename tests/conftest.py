@@ -74,6 +74,10 @@ def make_project(tmp_path: Path) -> Callable[..., Path]:
     return factory
 
 
+# Saídas padrão da Docker simulada (substituíveis por teste via ``outputs``).
+DEFAULT_OUTPUTS = {"compose version": "Docker Compose version v2.29.7"}
+
+
 @dataclass
 class FakeDocker:
     """Simula a Docker CLI. ``responses`` mapeia trechos do comando para resultados."""
@@ -95,7 +99,7 @@ class FakeDocker:
         key = self.key(argv)
         if key in self.failures:
             return CommandResult(argv, 1, "", f"falha simulada: {key}")
-        return CommandResult(argv, 0, self.outputs.get(key, ""), "")
+        return CommandResult(argv, 0, self.outputs.get(key, DEFAULT_OUTPUTS.get(key, "")), "")
 
     @staticmethod
     def key(argv: list[str]) -> str:

@@ -18,6 +18,7 @@ from dockerizer.docker.manager import (
     DockerManager,
     Runner,
     UnsafeDockerOperation,
+    compose_version_error,
 )
 from dockerizer.fs.changes import ChangeAction, apply_changes, plan_changes
 from dockerizer.generators.dockerfile import GenerationError
@@ -184,9 +185,16 @@ def docker_for(
     )
 
 
-def require_docker(docker: DockerManager) -> None:
+def require_docker(docker: DockerManager, uses_compose_file: bool = True) -> None:
+    """Docker disponível e, se o comando lê o compose.yaml, Compose em versão compatível.
+
+    ``purge`` não lê o compose.yaml (trabalha por label) e continua funcionando com um
+    Compose antigo, para que os dados nunca fiquem presos a uma atualização.
+    """
     if not docker.cli_available():
         fail("Docker CLI com o plugin Compose não encontrado. Instale o Docker e tente novamente.")
+    if uses_compose_file and (error := compose_version_error(docker.compose_version())):
+        fail(error)
     if not docker.daemon_running():
         fail("O daemon do Docker não está em execução (ou sem permissão de acesso).")
 
@@ -625,7 +633,7 @@ def purge(path: PathArg = None, path_opt: PathOpt = None, dry_run: DryRun = Fals
     store = ManifestStore(root)
     manifest = require_manifest(store)
     docker = docker_for(root, manifest, manifest.project_name, dry_run=dry_run)
-    require_docker(docker)
+    require_docker(docker, uses_compose_file=False)
     plan = plan_purge(manifest, docker)
     if not plan.volumes:
         ui.info("Nenhum volume gerenciado pelo Dockerizer encontrado para este projeto.")

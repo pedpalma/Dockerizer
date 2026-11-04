@@ -18,7 +18,7 @@ import yaml
 from dockerizer.analyzers.env import is_sensitive, parse_env_file
 from dockerizer.analyzers.infrastructure import SPECS
 from dockerizer.constants import COMPOSE_FILE
-from dockerizer.docker.manager import DockerManager
+from dockerizer.docker.manager import DockerManager, compose_version_error
 from dockerizer.fs.paths import PathSecurityError, read_text, resolve_inside
 
 REQUIRED_VAR_RE = re.compile(r"(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*):\?[^}]*\}")
@@ -256,6 +256,10 @@ def validate(
     result = validator.run()
     if docker is not None and result.ok and not overrides:
         if docker.cli_available():
+            # Com Compose antigo, "config" falharia com um erro de schema que não diz o motivo.
+            if error := compose_version_error(docker.compose_version()):
+                result.add(Level.ERROR, error, COMPOSE_FILE)
+                return result
             config = docker.config()
             result.docker_checked = True
             if not config.ok:
