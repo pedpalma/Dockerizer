@@ -8,6 +8,8 @@ BACKUPS_DIR: Final = "backups"
 REPORTS_DIR: Final = "reports"
 
 COMPOSE_FILE: Final = "compose.yaml"
+# Cópia do .env para os containers, com localhost trocado por host.docker.internal.
+HOST_ENV_FILE: Final = ".env.docker"
 COMPOSE_FILE_NAMES: Final = frozenset(
     {"compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"}
 )

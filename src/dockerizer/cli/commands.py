@@ -108,6 +108,25 @@ def load_manifest(store: ManifestStore) -> Manifest | None:
         fail(str(exc))
 
 
+# Arquivos do usuário que o Dockerizer só complementa (não substitui).
+APPENDED_FILES = frozenset({".env", ".gitignore"})
+
+
+def generated_paths(manifest: Manifest | None) -> list[str]:
+    """Arquivos cujo conteúdo é do Dockerizer (ignorados como evidência na análise).
+
+    Um ``.env`` preexistente que apenas foi complementado continua sendo do usuário: as URLs
+    dele seguem valendo como evidência.
+    """
+    if manifest is None:
+        return []
+    return [
+        path
+        for path, record in manifest.files.items()
+        if not (record.action == "modified" and path in APPENDED_FILES)
+    ]
+
+
 def require_manifest(store: ManifestStore) -> Manifest:
     manifest = load_manifest(store)
     if manifest is None:
@@ -163,7 +182,7 @@ def analyze(path: PathArg = None, path_opt: PathOpt = None, report: Report = Fal
     root = project_root(path, path_opt)
     store = ManifestStore(root)
     manifest = load_manifest(store)
-    analysis = analyze_project(root, manifest.files.keys() if manifest else ())
+    analysis = analyze_project(root, generated_paths(manifest))
     ui.show_analysis(analysis)
     if report:
         paths = write_reports(store, analysis)
@@ -195,11 +214,12 @@ def setup(
     manifest = load_manifest(store)
     mode = Mode.DEVELOPMENT if dev else Mode.PRODUCTION
 
-    analysis = analyze_project(root, manifest.files.keys() if manifest else ())
+    analysis = analyze_project(root, generated_paths(manifest))
     ui.show_analysis(analysis)
     if not analysis.applications:
         fail("Nada a containerizar.")
-    unresolved = ui.resolve_questions(analysis, yes)
+    answers = dict(manifest.answers) if manifest else {}
+    unresolved = ui.resolve_questions(analysis, yes, answers)
     if unresolved:
         fail(
             "Informações obrigatórias sem confirmação: "
@@ -266,6 +286,7 @@ def setup(
 
     run_id = new_run_id()
     manifest = manifest or Manifest(project_name=analysis.project_name)
+    manifest.answers = answers
     run = RunRecord(id=run_id, command="setup", mode=mode.value)
     manifest.runs.append(run)
     manifest.mode = mode.value

@@ -11,7 +11,7 @@ from typing import Any
 import yaml
 
 from dockerizer.analyzers.env import parse_env_file
-from dockerizer.constants import COMPOSE_FILE, COMPOSE_FILE_NAMES, TOOL_DIR
+from dockerizer.constants import COMPOSE_FILE, COMPOSE_FILE_NAMES, HOST_ENV_FILE, TOOL_DIR
 from dockerizer.fs.changes import GeneratedFile, WritePolicy
 from dockerizer.fs.paths import read_text
 from dockerizer.generators.compose import ComposeResult, build_compose, service_names
@@ -21,6 +21,7 @@ from dockerizer.generators.envfiles import (
     generate_secret,
     infra_defaults,
     render_env_example,
+    render_host_env,
     render_new_env,
 )
 from dockerizer.models.architecture import Mode, ProcessKind, ProjectAnalysis
@@ -128,6 +129,35 @@ def _app_env_files(analysis: ProjectAnalysis) -> dict[str, list[str]]:
     return result
 
 
+def _real_env_texts(root: Path, app_env_files: dict[str, list[str]]) -> dict[str, str]:
+    """Conteúdo dos .env reais carregados pelo Compose (na ordem em que são carregados)."""
+    texts: dict[str, str] = {}
+    for files in app_env_files.values():
+        for rel in files:
+            path = root / rel
+            if rel not in texts and path.is_file() and not path.is_symlink():
+                texts[rel] = read_text(path)
+    return texts
+
+
+def _proxy_warnings(analysis: ProjectAnalysis, compose: ComposeResult) -> list[str]:
+    """Rotas do nginx existente cuja porta muda no Compose."""
+    published = {b.service: b.host_port for b in compose.ports}
+    warnings = []
+    for proxy in analysis.reverse_proxies:
+        for route in proxy.routes:
+            if route.app is None or route.port is None:
+                continue
+            host_port = published.get(route.app)
+            if host_port is not None and host_port != route.port:
+                warnings.append(
+                    f"nginx ({proxy.path}): 'location {route.location}' aponta para a porta "
+                    f"{route.port} ('{route.app}'); no Compose a aplicação fica na porta "
+                    f"{host_port} do host. Ajuste o proxy_pass ao migrar."
+                )
+    return warnings
+
+
 def _nested_apps(analysis: ProjectAnalysis, app_path: str) -> list[str]:
     nested = []
     for other in analysis.applications:
@@ -160,13 +190,14 @@ def _safe_install_files(root: Path, analysis: ProjectAnalysis) -> tuple[set[str]
     return allowed, warnings
 
 
-def _gitignore(root: Path) -> GeneratedFile | None:
+def _gitignore(root: Path, extra: dict[str, set[str]] | None = None) -> GeneratedFile | None:
     path = root / ".gitignore"
     if not path.is_file() and not (root / ".git").exists():
         return None
     existing = read_text(path) if path.is_file() else ""
     lines = {line.strip() for line in existing.splitlines()}
-    missing = [entry for entry, accepted in GITIGNORE_ENTRIES.items() if not (lines & accepted)]
+    entries = {**GITIGNORE_ENTRIES, **(extra or {})}
+    missing = [entry for entry, accepted in entries.items() if not (lines & accepted)]
     if not missing:
         return None
     prefix = existing if not existing or existing.endswith("\n") else existing + "\n"
@@ -218,8 +249,16 @@ def build_plan(
             )
         )
 
-    compose = build_compose(analysis, mode, host_ports, _app_env_files(analysis))
+    app_env_files = _app_env_files(analysis)
+    host_env, host_warnings = render_host_env(analysis, _real_env_texts(root, app_env_files))
+    warnings.extend(host_warnings)
+    if host_env is not None:
+        host_users = {name for s in analysis.host_services() for name in s.used_by}
+        for app_name in host_users & set(app_env_files):
+            app_env_files[app_name].append(HOST_ENV_FILE)
+    compose = build_compose(analysis, mode, host_ports, app_env_files)
     warnings.extend(compose.warnings)
+    warnings.extend(_proxy_warnings(analysis, compose))
     files.append(
         GeneratedFile(
             path=COMPOSE_FILE,
@@ -266,7 +305,21 @@ def build_plan(
             sensitive=True,
         )
     )
-    gitignore = _gitignore(root)
+    if host_env is not None:
+        files.append(
+            GeneratedFile(
+                path=HOST_ENV_FILE,
+                content=host_env,
+                policy=WritePolicy.REPLACE,
+                description="Variáveis do .env apontando para os serviços do host",
+                mode=0o600,
+                sensitive=True,
+            )
+        )
+    extra_ignores = {
+        HOST_ENV_FILE: {HOST_ENV_FILE, f"/{HOST_ENV_FILE}", ".env*", ".env.*", "*.env*"}
+    }
+    gitignore = _gitignore(root, extra_ignores if host_env is not None else None)
     if gitignore:
         files.append(gitignore)
     return GenerationPlan(

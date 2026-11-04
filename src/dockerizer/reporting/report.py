@@ -46,6 +46,11 @@ def render_markdown(
             out.append(f"- Migrações ({app.migration.tool}): `{' '.join(app.migration.command)}`")
         if app.existing_dockerfile:
             out.append(f"- Dockerfile existente preservado: `{app.existing_dockerfile}`")
+        for data_dir in app.data_dirs:
+            out.append(
+                f"- Dados persistentes: `{data_dir.path}` → volume `{data_dir.volume}` "
+                f"({data_dir.source})"
+            )
         for item in app.evidence:
             out.append(f"  - evidência: {item}")
         for warning in app.warnings:
@@ -64,6 +69,18 @@ def render_markdown(
                 f"  - [{evidence.strength.value}] {evidence.description} (`{evidence.source}`)"
             )
         out.append("")
+    if analysis.reverse_proxies:
+        out.append("## Proxy reverso existente (nginx) — não reproduzido")
+        for proxy in analysis.reverse_proxies:
+            names = ", ".join(proxy.server_names) or "sem server_name"
+            tls = ", TLS" if proxy.tls else ""
+            out.append(f"### `{proxy.path}` ({names}{tls})")
+            for route in proxy.routes:
+                target_app = f" → aplicação `{route.app}`" if route.app else ""
+                out.append(f"- `location {route.location}`: `{route.target}`{target_app}")
+            for setting in proxy.settings:
+                out.append(f"- ajuste: `{setting}`")
+            out.append("")
     out.append("## Variáveis de ambiente")
     for var in analysis.env_vars:
         flag = " (sensível)" if var.sensitive else ""

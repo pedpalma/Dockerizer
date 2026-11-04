@@ -96,6 +96,7 @@ def _python(app: Application, mode: Mode, process: Process) -> str:
         install_project=app.has_build_system and app.package_manager is PackageManager.PIP,
         port=process.port_for(mode) if process.kind is ProcessKind.WEB else None,
         command=command.argv,
+        data_dirs=[d.path for d in app.data_dirs],
     )
 
 
@@ -143,6 +144,7 @@ def _node(app: Application, mode: Mode, process: Process, existing: set[str]) ->
         nginx_image=NGINX_IMAGE,
         port=port,
         command=argv,
+        data_dirs=[d.path for d in app.data_dirs],
     )
 
 

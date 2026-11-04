@@ -59,6 +59,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=cache,target=/root/.cache/pip pip install .
 
 {% endif %}
+{% if data_dirs %}
+
+# Diretórios de dados (volumes nomeados): criados com o dono certo para o volume herdá-lo.
+RUN mkdir -p {{ data_dirs | map("shell_quote") | join(" ") }} \
+ && chown app:app {{ data_dirs | map("shell_quote") | join(" ") }}
+{% endif %}
 USER app
 {% if port %}
 

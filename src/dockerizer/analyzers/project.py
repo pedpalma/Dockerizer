@@ -6,9 +6,15 @@ import re
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 
+from dockerizer.analyzers.datadirs import detect_data_dirs
 from dockerizer.analyzers.env import IGNORED_ENV, is_sensitive, parse_env_file
 from dockerizer.analyzers.infrastructure import SPECS, InfrastructureAnalyzer
+from dockerizer.analyzers.nginx import analyze_nginx
 from dockerizer.analyzers.node import NodeAnalyzer
+from dockerizer.analyzers.process_managers import (
+    apply_process_definitions,
+    find_process_definitions,
+)
 from dockerizer.analyzers.python import PythonAnalyzer
 from dockerizer.analyzers.resolution import build_questions
 from dockerizer.models.architecture import (
@@ -97,10 +103,16 @@ def analyze_project(root: Path, managed_paths: Iterable[str] = ()) -> ProjectAna
     analysis.languages = sorted({a.language for a in analysis.applications}, key=str)
     analysis.env_vars = _collect_env(files, analysis.applications, analysis.env_files)
 
+    definitions, manager_notes = find_process_definitions(files)
+    apply_process_definitions(analysis, definitions)
+    analysis.notes.extend(manager_notes)
+
     compose_files = [rel for rel, kind in docker_files if kind == "compose" and rel not in managed]
     infra = InfrastructureAnalyzer(files, analysis.applications, analysis.env_files, compose_files)
     analysis.services = infra.analyze()
     analysis.notes.extend(infra.notes)
+    detect_data_dirs(files, analysis)
+    analyze_nginx(files, analysis)
     for script in analysis.init_scripts:
         analysis.notes.append(f"Script de inicialização encontrado (não executado): {script}")
     analysis.questions = build_questions(analysis)

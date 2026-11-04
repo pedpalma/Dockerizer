@@ -99,6 +99,15 @@ class Process(BaseModel):
         return self.port
 
 
+class DataDir(BaseModel):
+    """Diretório em que a aplicação grava arquivos que precisam sobreviver ao container."""
+
+    path: str  # caminho absoluto dentro do container
+    source: str
+    variable: str | None = None
+    volume: str = ""
+
+
 class Migration(BaseModel):
     tool: str
     command: list[str]
@@ -121,6 +130,7 @@ class Application(BaseModel):
     evidence: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     existing_dockerfile: str | None = None
+    data_dirs: list[DataDir] = Field(default_factory=list)
 
     # Python
     dependency_files: list[str] = Field(default_factory=list)
@@ -154,6 +164,9 @@ class ServiceDecision(StrEnum):
     EXTERNAL = "externo"
     UNDETERMINED = "indeterminado"
     DISCARDED = "descartado"
+    # Serviço que já roda na máquina (ex.: PostgreSQL instalado): acessado via
+    # host.docker.internal, sem container nem volume.
+    HOST = "host"
 
 
 class EvidenceStrength(StrEnum):
@@ -168,6 +181,7 @@ class Evidence(BaseModel):
     strength: EvidenceStrength
     points_to: ServiceDecision | None = None
     app: str | None = None
+    host_machine: bool = False  # aponta para localhost/127.0.0.1 (esta máquina)
 
 
 class InfraService(BaseModel):
@@ -178,6 +192,9 @@ class InfraService(BaseModel):
     image: str
     reason: str = ""
     url_scheme: str | None = None
+    # Decidido como local só porque o .env real aponta para localhost: pode ser um serviço
+    # já instalado na máquina, e não um container a criar. Exige confirmação.
+    host_candidate: bool = False
 
 
 class EnvVar(BaseModel):
@@ -206,6 +223,25 @@ class Question(BaseModel):
     help: str = ""
 
 
+class ProxyRoute(BaseModel):
+    location: str
+    kind: str  # proxy, estatico, redirecionamento, outro
+    target: str
+    app: str | None = None
+    port: int | None = None
+
+
+class ReverseProxy(BaseModel):
+    """Configuração de nginx encontrada no projeto. É reportada, nunca reproduzida."""
+
+    path: str
+    server_names: list[str] = Field(default_factory=list)
+    listens: list[str] = Field(default_factory=list)
+    tls: bool = False
+    routes: list[ProxyRoute] = Field(default_factory=list)
+    settings: list[str] = Field(default_factory=list)
+
+
 class ExistingDockerFile(BaseModel):
     path: str
     kind: str
@@ -221,6 +257,7 @@ class ProjectAnalysis(BaseModel):
     env_files: list[str] = Field(default_factory=list)
     existing_docker_files: list[ExistingDockerFile] = Field(default_factory=list)
     init_scripts: list[str] = Field(default_factory=list)
+    reverse_proxies: list[ReverseProxy] = Field(default_factory=list)
     languages: list[Language] = Field(default_factory=list)
     questions: list[Question] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
@@ -228,6 +265,9 @@ class ProjectAnalysis(BaseModel):
 
     def local_services(self) -> list[InfraService]:
         return [s for s in self.services if s.decision is ServiceDecision.LOCAL]
+
+    def host_services(self) -> list[InfraService]:
+        return [s for s in self.services if s.decision is ServiceDecision.HOST]
 
     def service(self, kind: ServiceKind) -> InfraService | None:
         return next((s for s in self.services if s.kind is kind), None)

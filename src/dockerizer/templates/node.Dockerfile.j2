@@ -13,6 +13,10 @@ WORKDIR /app
 RUN corepack enable
 {% endif %}
 RUN chown node:node /app
+{% if data_dirs %}
+RUN mkdir -p {{ data_dirs | map("shell_quote") | join(" ") }} \
+ && chown node:node {{ data_dirs | map("shell_quote") | join(" ") }}
+{% endif %}
 USER node
 
 COPY --chown=node:node {{ install_files | join(" ") }} ./
@@ -82,6 +86,11 @@ ENV NODE_ENV=production{% if port %} \
 
 WORKDIR /app
 COPY --from=build --chown=node:node /app ./
+{% if data_dirs %}
+# Diretórios de dados (volumes nomeados): criados com o dono certo para o volume herdá-lo.
+RUN mkdir -p {{ data_dirs | map("shell_quote") | join(" ") }} \
+ && chown node:node {{ data_dirs | map("shell_quote") | join(" ") }}
+{% endif %}
 USER node
 {% if port %}
 

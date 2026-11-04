@@ -66,6 +66,8 @@ class Manifest(BaseModel):
     files: dict[str, FileRecord] = Field(default_factory=dict)
     preserved_backups: list[str] = Field(default_factory=list)
     docker: DockerResources | None = None
+    # Respostas do usuário às perguntas da análise (id da pergunta → resposta).
+    answers: dict[str, str] = Field(default_factory=dict)
 
     def record_for(self, path: str) -> FileRecord | None:
         return self.files.get(path)
