@@ -33,7 +33,11 @@ packages = ["src/dockerizer"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+# Os testes de integração (Docker real, rede, minutos) rodam só com: pytest -m docker
+addopts = "-ra -m 'not docker'"
+markers = [
+    "docker: integração com o Docker real (constrói imagens e sobe containers; exige rede)",
+]
 
 [tool.ruff]
 line-length = 100

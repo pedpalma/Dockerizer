@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -251,6 +252,40 @@ def show_changes(changes: list[PlannedChange]) -> None:
         style = ACTION_STYLE[change.action]
         table.add_row(change.file.path, f"[{style}]{change.action.value}[/{style}]", change.reason)
     console.print(table)
+
+
+DIFF_STYLES = (("+++", "bold"), ("---", "bold"), ("@@", "cyan"), ("+", "green"), ("-", "red"))
+
+
+def show_diffs(root: Path, changes: list[PlannedChange]) -> None:
+    """Conteúdo exato que cada alteração grava (valores sensíveis ocultos).
+
+    Linhas longas são quebradas, nunca cortadas: o objetivo é revisar o conteúdo inteiro.
+    """
+    from rich.text import Text
+
+    from dockerizer.reporting.diff import change_diff
+
+    shown = False
+    for change in changes:
+        diff = change_diff(root, change)
+        if diff is None:
+            continue
+        shown = True
+        title = escape(change.file.path)
+        if change.action is ChangeAction.CONFLICT:
+            title += " [bold red](conflito: não será gravado)[/bold red]"
+        console.rule(title, align="left")
+        for line in diff.splitlines():
+            style = next((st for prefix, st in DIFF_STYLES if line.startswith(prefix)), "")
+            console.print(Text(line, style=style), soft_wrap=False, overflow="fold")
+    if shown:
+        console.rule()
+        info(
+            "[dim]Valores sensíveis (senhas, tokens, URLs com credenciais) aparecem como ********.[/dim]"
+        )
+    else:
+        info("[dim]Nenhum arquivo seria alterado.[/dim]")
 
 
 def show_validation(result: ValidationResult) -> None:
