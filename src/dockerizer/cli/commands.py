@@ -240,6 +240,13 @@ def setup(
         ),
     ] = False,
     report: Report = False,
+    diff: Annotated[
+        bool,
+        typer.Option(
+            "--diff",
+            help="Mostra o conteúdo que seria gravado em cada arquivo (diff; segredos ocultos).",
+        ),
+    ] = False,
     host_ip: Annotated[
         str | None,
         typer.Option(
@@ -290,6 +297,8 @@ def setup(
         fail(str(exc))
     changes = plan_changes(root, plan.files, manifest, force)
     ui.show_changes(changes)
+    if diff:
+        ui.show_diffs(root, changes)
     for warning in plan.warnings:
         ui.warn(warning)
 

@@ -33,10 +33,27 @@ Para desenvolvimento do próprio Dockerizer:
 
 ```bash
 uv sync
-uv run pytest          # testes (não exigem daemon Docker)
+uv run pytest          # testes unitários (Docker simulado; não exigem daemon)
 uv run ruff check .    # lint
 uv run mypy            # tipagem estrita
 ```
+
+Testes de integração com o **Docker real** (constroem imagens, sobem containers e exigem
+rede; levam alguns minutos):
+
+```bash
+uv run pytest -m docker -v
+```
+
+Eles percorrem o ciclo completo em projetos de exemplo — FastAPI + PostgreSQL + Redis
+(incluindo `down` → `rollback` → `setup` com dados preservados e `purge`), Compose existente
+com Dockerfile fora da aplicação e nginx, banco "do host" via `host.docker.internal` e
+Next.js standalone — e terminam conferindo que não sobrou nenhum container, volume, rede ou
+imagem e que o projeto ficou idêntico ao original. Cada teste usa um projeto Compose de nome
+único e limpa apenas os próprios recursos, mesmo quando falha.
+
+O CI (`.github/workflows/ci.yml`) roda lint, tipos e testes unitários em todo push e pull
+request, e a integração com Docker em seguida.
 
 ## Tecnologias suportadas
 
@@ -59,6 +76,9 @@ dockerizer analyze .
 
 # Ver o que seria feito, sem efeito algum
 dockerizer setup . --dry-run
+
+# ... incluindo o conteúdo exato de cada arquivo (segredos ocultos)
+dockerizer setup . --dry-run --diff
 
 # Gerar e validar a configuração
 dockerizer setup .
@@ -121,6 +141,7 @@ com `--path`. Sem nenhum dos dois, o diretório atual é usado.
 | `--start` | `setup` | Inicia os serviços. |
 | `--dev` / `--production` | `setup` | Ambiente de desenvolvimento ou de produção (padrão). |
 | `--report` | `analyze`, `setup` | Gera relatório (Markdown e JSON) em `.dockerizer/reports/`. |
+| `--diff` | `setup` | Mostra o conteúdo que seria gravado em cada arquivo (diff unificado; senhas, tokens e URLs com credenciais aparecem como `********`). Combine com `--dry-run` para revisar sem gravar. |
 | `--host-ip` | `setup` | Endereço em que as portas são publicadas (ex.: `127.0.0.1`, `0.0.0.0`). Padrão: `127.0.0.1` se o projeto tem nginx, senão todas as interfaces. A escolha é lembrada. |
 | `--images` | `rollback` | Remove também as imagens construídas pelo Dockerizer (nunca imagens base). |
 
