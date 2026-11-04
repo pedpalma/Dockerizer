@@ -1,0 +1,61 @@
+[project]
+name = "dockerizer"
+version = "0.1.0"
+description = "Ferramenta CLI para containerizar projetos existentes com Docker e Docker Compose."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "typer>=0.15",
+    "rich>=13.9",
+    "pydantic>=2.9",
+    "jinja2>=3.1",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+dockerizer = "dockerizer.cli.commands:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "types-pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dockerizer"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "PTH"]
+ignore = [
+    "E501", # comprimento de linha fica a cargo do ruff format
+    "S104", # bind em 0.0.0.0 é intencional: comandos executam dentro de containers
+    "S603", # subprocess sem shell: uso intencional e controlado em docker/manager.py
+    "S607", # executável resolvido pelo PATH (docker)
+    "RUF001", "RUF002", "RUF003", # textos em português com acentuação
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S108"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = "src"
+packages = ["dockerizer"]
+plugins = ["pydantic.mypy"]
