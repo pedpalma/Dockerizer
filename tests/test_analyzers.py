@@ -297,3 +297,61 @@ def test_analysis_does_not_modify_project(make_project: Factory) -> None:
     before = tree_digest(root)
     analyze_project(root)
     assert tree_digest(root) == before
+
+
+def test_basesettings_env_prefix_and_nested_settings() -> None:
+    from dockerizer.analyzers.env import python_env_refs
+
+    source = (
+        "from pydantic_settings import BaseSettings, SettingsConfigDict\n\n"
+        "class DatabaseSettings(BaseSettings):\n"
+        "    user: str\n"
+        "    password: SecretStr\n"
+        "    pool_size: int = 10\n\n"
+        "    model_config = SettingsConfigDict(\n"
+        '        env_prefix="DB_",\n'
+        "        extra='ignore',\n"
+        "    )\n\n"
+        "    @property\n"
+        "    def url(self) -> str:\n"
+        "        return ''\n\n"
+        "class LegacySettings(BaseSettings):\n"
+        "    level: str = 'INFO'\n\n"
+        "    class Config:\n"
+        "        env_prefix = 'log_'\n\n"
+        "class AppSettings(BaseSettings):\n"
+        "    db: DatabaseSettings = Field(default_factory=DatabaseSettings)\n"
+        "    legacy: 'LegacySettings | None' = None\n"
+        "    debug: bool = False\n"
+    )
+    assert python_env_refs(source) == {
+        "DB_USER",
+        "DB_PASSWORD",
+        "DB_POOL_SIZE",
+        "LOG_LEVEL",
+        "DEBUG",
+    }
+
+
+def test_basesettings_field_alias_and_docstrings() -> None:
+    from dockerizer.analyzers.env import python_env_refs
+
+    source = (
+        "class CollectionSettings(BaseSettings):\n"
+        '    """Configurações.\n\n'
+        "    Uso:\n"
+        "        settings.collection\n"
+        '    """\n\n'
+        "    model_config = _COMMON_CONFIG\n\n"
+        "    # comentário: sem efeito\n"
+        "    olt_adapter: Literal['mock', 'zte'] = Field(\n"
+        "        default='mock',\n"
+        '        alias="COLLECTION_OLT_ADAPTER",\n'
+        "    )\n"
+        "    lock_wait: float = 30.0\n\n"
+        "    @field_validator('lock_wait')\n"
+        "    def _check(cls, value: float) -> float:\n"
+        "        alias = 'NAO_E_CAMPO'\n"
+        "        return value\n"
+    )
+    assert python_env_refs(source) == {"COLLECTION_OLT_ADAPTER", "LOCK_WAIT"}

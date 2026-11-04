@@ -148,3 +148,18 @@ def test_ci_files_are_not_runtime_evidence(make_project: Factory) -> None:
         }
     )
     assert _service(root, ServiceKind.POSTGRES).decision is ServiceDecision.UNDETERMINED
+
+
+def test_postgres_derived_image_in_compose_is_local(make_project: Factory) -> None:
+    root = make_project(
+        {
+            "requirements.txt": "fastapi\nuvicorn\nasyncpg\n",
+            "main.py": FASTAPI,
+            "docker-compose.yml": (
+                "services:\n  postgres:\n    image: timescale/timescaledb:2.29.1-pg17\n"
+            ),
+        }
+    )
+    service = _service(root, ServiceKind.POSTGRES)
+    assert service.decision is ServiceDecision.LOCAL
+    assert service.image == "timescale/timescaledb:2.29.1-pg17"

@@ -150,7 +150,9 @@ def image_name(project: str, app: Application) -> str:
 
 
 def postgres_data_path(image: str) -> str:
-    match = re.search(r":(\d+)", image)
+    # Imagens derivadas (timescale/timescaledb:2.x-pg17, pgvector/pgvector:pg17) trazem a
+    # versão do PostgreSQL após "pg"; na imagem oficial ela é o início da tag.
+    match = re.search(r"[:-]pg(\d+)", image) or re.search(r":(\d+)", image)
     if match and int(match.group(1)) >= 18:
         return "/var/lib/postgresql"
     return "/var/lib/postgresql/data"
