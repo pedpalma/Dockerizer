@@ -68,6 +68,10 @@ class Manifest(BaseModel):
     docker: DockerResources | None = None
     # Respostas do usuário às perguntas da análise (id da pergunta → resposta).
     answers: dict[str, str] = Field(default_factory=dict)
+    # Endereço de publicação escolhido com --host-ip (reutilizado nos próximos setup).
+    publish_ip: str | None = None
+    # .env de origem do .env.docker → SHA-256 do conteúdo usado na geração.
+    host_env_sources: dict[str, str] = Field(default_factory=dict)
 
     def record_for(self, path: str) -> FileRecord | None:
         return self.files.get(path)

@@ -7,13 +7,26 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import SplitResult, urlsplit
 
 import yaml
 
-from dockerizer.analyzers.env import parse_env_file
-from dockerizer.constants import COMPOSE_FILE, COMPOSE_FILE_NAMES, HOST_ENV_FILE, TOOL_DIR
+from dockerizer.analyzers.env import (
+    URL_RE,
+    is_host_machine,
+    parse_connection_url,
+    parse_env_file,
+)
+from dockerizer.analyzers.infrastructure import SPECS
+from dockerizer.constants import (
+    COMPOSE_FILE,
+    COMPOSE_FILE_NAMES,
+    HOST_ENV_FILE,
+    TOOL_DIR,
+    compose_project_name,
+)
 from dockerizer.fs.changes import GeneratedFile, WritePolicy
-from dockerizer.fs.paths import read_text
+from dockerizer.fs.paths import read_text, sha256_text
 from dockerizer.generators.compose import ComposeResult, build_compose, service_names
 from dockerizer.generators.dockerfile import main_process, render_dockerfile, render_dockerignore
 from dockerizer.generators.envfiles import (
@@ -24,7 +37,7 @@ from dockerizer.generators.envfiles import (
     render_host_env,
     render_new_env,
 )
-from dockerizer.models.architecture import Mode, ProcessKind, ProjectAnalysis
+from dockerizer.models.architecture import Mode, ProcessKind, ProjectAnalysis, ServiceKind
 
 GITIGNORE_ENTRIES = {
     ".env": {".env", "/.env", ".env*", "*.env"},
@@ -115,6 +128,8 @@ class GenerationPlan:
     compose: ComposeResult
     infra_values: dict[str, str]
     warnings: list[str] = field(default_factory=list)
+    # Hash dos .env de onde o .env.docker foi derivado (para detectar que ficou desatualizado).
+    host_env_sources: dict[str, str] = field(default_factory=dict)
 
 
 def _app_env_files(analysis: ProjectAnalysis) -> dict[str, list[str]]:
@@ -129,6 +144,30 @@ def _app_env_files(analysis: ProjectAnalysis) -> dict[str, list[str]]:
     return result
 
 
+LOOPBACK = "127.0.0.1"
+
+
+def choose_publish_ip(
+    analysis: ProjectAnalysis, requested: str | None, stored: str | None
+) -> tuple[str | None, str | None]:
+    """Endereço em que as portas são publicadas e o motivo (para exibir).
+
+    Com um proxy reverso no projeto, publicar em todas as interfaces deixaria a aplicação
+    acessível direto pela porta, contornando TLS, limites e autenticação do nginx.
+    """
+    if requested is not None:
+        return (None if requested in ("0.0.0.0", "*") else requested), None
+    if stored is not None:
+        return (None if stored in ("0.0.0.0", "*") else stored), None
+    if analysis.reverse_proxies:
+        return LOOPBACK, (
+            "Proxy reverso encontrado: as portas são publicadas apenas em 127.0.0.1 para que a "
+            "aplicação não fique acessível sem o nginx. Use --host-ip 0.0.0.0 para publicá-las "
+            "em todas as interfaces."
+        )
+    return None, None
+
+
 def _real_env_texts(root: Path, app_env_files: dict[str, list[str]]) -> dict[str, str]:
     """Conteúdo dos .env reais carregados pelo Compose (na ordem em que são carregados)."""
     texts: dict[str, str] = {}
@@ -138,6 +177,60 @@ def _real_env_texts(root: Path, app_env_files: dict[str, list[str]]) -> dict[str
             if rel not in texts and path.is_file() and not path.is_symlink():
                 texts[rel] = read_text(path)
     return texts
+
+
+def _host_url(kind: ServiceKind, env_texts: dict[str, str]) -> SplitResult | None:
+    """URL do .env que aponta o serviço para esta máquina (usuário, porta e banco)."""
+    for text in env_texts.values():
+        for value in parse_env_file(text).values():
+            for raw in URL_RE.findall(value):
+                url = parse_connection_url(str(raw))
+                if url and url.service == kind.value and is_host_machine(url.host):
+                    return urlsplit(str(raw))
+    return None
+
+
+def data_copy_hints(analysis: ProjectAnalysis, env_texts: dict[str, str]) -> list[str]:
+    """Comandos (apenas exibidos, nunca executados) para copiar os dados do serviço do host."""
+    project = compose_project_name(analysis.project_name)
+    compose = f"docker compose -f {COMPOSE_FILE} -p {project}"
+    hints = []
+    for service in analysis.local_services():
+        if not service.replaces_host:
+            continue
+        url = _host_url(service.kind, env_texts)
+        port = url.port if url and url.port else SPECS[service.kind].port
+        user = (url.username if url else None) or "<usuario>"
+        database = (url.path.lstrip("/") if url else "") or "<banco>"
+        label = SPECS[service.kind].label
+        prefix = f"O {label} novo começa vazio. Para copiar os dados do {label} do host (após 'dockerizer up'):"
+        if service.kind is ServiceKind.POSTGRES:
+            steps = [
+                f"pg_dump -h localhost -p {port} -U {user} -Fc {database} -f backup.dump",
+                f"{compose} cp backup.dump postgres:/tmp/backup.dump",
+                f'{compose} exec postgres sh -c \'pg_restore -U "$POSTGRES_USER" '
+                '-d "$POSTGRES_DB" --no-owner /tmp/backup.dump\'',
+            ]
+        elif service.kind is ServiceKind.MYSQL:
+            steps = [
+                f"mysqldump -h 127.0.0.1 -P {port} -u {user} -p {database} > backup.sql",
+                f'{compose} exec -T mysql sh -c \'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" '
+                '"$MYSQL_DATABASE"\' < backup.sql',
+            ]
+        elif service.kind is ServiceKind.REDIS:
+            hints.append(
+                f"O Redis novo começa vazio. Se ele guarda mais que cache, gere um dump com "
+                f"'redis-cli -p {port} --rdb dump.rdb' e copie-o para o volume redis_data com o "
+                "serviço parado."
+            )
+            continue
+        else:
+            hints.append(
+                f"O {label} novo começa vazio; mensagens em filas do host não são migradas."
+            )
+            continue
+        hints.append(prefix + "\n  " + "\n  ".join(steps))
+    return hints
 
 
 def _proxy_warnings(analysis: ProjectAnalysis, compose: ComposeResult) -> list[str]:
@@ -156,6 +249,17 @@ def _proxy_warnings(analysis: ProjectAnalysis, compose: ComposeResult) -> list[s
                     f"{host_port} do host. Ajuste o proxy_pass ao migrar."
                 )
     return warnings
+
+
+def _excluded_apps(analysis: ProjectAnalysis, context: str) -> list[str]:
+    """Pastas de outras aplicações dentro do contexto, a excluir do build.
+
+    Aplicações construídas a partir deste mesmo contexto (ex.: Dockerfiles em infra/docker/
+    com contexto na raiz) precisam das próprias pastas e não são excluídas.
+    """
+    users = {a.path for a in analysis.applications if (a.build_context or a.path) == context}
+    prefix = "" if context == "." else context + "/"
+    return [nested for nested in _nested_apps(analysis, context) if prefix + nested not in users]
 
 
 def _nested_apps(analysis: ProjectAnalysis, app_path: str) -> list[str]:
@@ -217,6 +321,7 @@ def build_plan(
     host_ports: dict[str, int],
     known_credentials: dict[str, str],
     secret: Callable[[], str] = generate_secret,
+    publish_ip: str | None = None,
 ) -> GenerationPlan:
     """Gera o conteúdo de todos os arquivos. Lança ``GenerationError`` se faltar informação."""
     root = root.resolve()
@@ -240,25 +345,30 @@ def build_plan(
                     f"Dockerfile existente de '{app.name}' será usado sem alterações; "
                     "confirme que ele expõe a porta esperada."
                 )
-        files.append(
-            GeneratedFile(
-                path=(base / ".dockerignore").as_posix(),
-                content=render_dockerignore(app, _nested_apps(analysis, app.path)),
-                policy=WritePolicy.PRESERVE,
-                description=f"Contexto de build de '{app.name}' (exclui segredos)",
+        context = app.build_context or app.path
+        ignore_path = (PurePosixPath(context) / ".dockerignore").as_posix()
+        if ignore_path not in {f.path for f in files}:
+            files.append(
+                GeneratedFile(
+                    path=ignore_path,
+                    content=render_dockerignore(app, _excluded_apps(analysis, context)),
+                    policy=WritePolicy.PRESERVE,
+                    description=f"Contexto de build de '{app.name}' (exclui segredos)",
+                )
             )
-        )
 
     app_env_files = _app_env_files(analysis)
-    host_env, host_warnings = render_host_env(analysis, _real_env_texts(root, app_env_files))
+    env_texts = _real_env_texts(root, app_env_files)
+    host_env, host_warnings = render_host_env(analysis, env_texts)
     warnings.extend(host_warnings)
     if host_env is not None:
         host_users = {name for s in analysis.host_services() for name in s.used_by}
         for app_name in host_users & set(app_env_files):
             app_env_files[app_name].append(HOST_ENV_FILE)
-    compose = build_compose(analysis, mode, host_ports, app_env_files)
+    compose = build_compose(analysis, mode, host_ports, app_env_files, publish_ip)
     warnings.extend(compose.warnings)
     warnings.extend(_proxy_warnings(analysis, compose))
+    warnings.extend(data_copy_hints(analysis, env_texts))
     files.append(
         GeneratedFile(
             path=COMPOSE_FILE,
@@ -322,6 +432,24 @@ def build_plan(
     gitignore = _gitignore(root, extra_ignores if host_env is not None else None)
     if gitignore:
         files.append(gitignore)
-    return GenerationPlan(
-        files=files, compose=compose, infra_values=infra_values, warnings=warnings
+    sources = (
+        {rel: sha256_text(text) for rel, text in env_texts.items()} if host_env is not None else {}
     )
+    return GenerationPlan(
+        files=files,
+        compose=compose,
+        infra_values=infra_values,
+        warnings=warnings,
+        host_env_sources=sources,
+    )
+
+
+def stale_host_env(root: Path, sources: dict[str, str]) -> list[str]:
+    """Arquivos .env alterados (ou removidos) depois da geração do .env.docker."""
+    stale = []
+    for rel, digest in sources.items():
+        path = root / rel
+        current = sha256_text(read_text(path)) if path.is_file() else None
+        if current != digest:
+            stale.append(rel)
+    return stale

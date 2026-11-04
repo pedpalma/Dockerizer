@@ -298,6 +298,8 @@ class PythonAnalyzer:
         app.env_vars = sorted(set(app.env_vars))
         self._processes(app, texts, pyproject)
         self._migrations(app)
+        if app.has_framework(Framework.DJANGO):
+            app.warnings.extend(django_production_warnings(app, texts))
         app.role = AppRole.BACKEND if app.process("web") else AppRole.WORKER
         return app
 
@@ -639,3 +641,44 @@ class PythonAnalyzer:
             )
             if Framework.ALEMBIC not in app.frameworks:
                 app.frameworks.append(Framework.ALEMBIC)
+
+
+DJANGO_DEBUG_TRUE_RE = re.compile(r"^DEBUG\s*=\s*True\b", re.MULTILINE)
+DJANGO_EMPTY_HOSTS_RE = re.compile(r"^ALLOWED_HOSTS\s*=\s*\[\s*\]", re.MULTILINE)
+DJANGO_STATIC_ROOT_RE = re.compile(r"^STATIC_ROOT\s*=", re.MULTILINE)
+
+
+def django_production_warnings(app: Application, texts: dict[str, str]) -> list[str]:
+    """Configurações do Django que quebram ou expõem a aplicação num container de produção.
+
+    Nada é alterado: só o próprio projeto sabe os hosts e o destino dos arquivos estáticos.
+    """
+    settings = {rel: text for rel, text in texts.items() if "settings" in rel}
+    if not settings:
+        return []
+    joined = "\n".join(settings.values())
+    where = ", ".join(sorted(settings))
+    warnings = []
+    if DJANGO_DEBUG_TRUE_RE.search(joined):
+        warnings.append(
+            f"DEBUG = True fixo em {where}: em produção, leia-o de uma variável de ambiente "
+            "(páginas de erro do Django expõem configurações e código)."
+        )
+    if DJANGO_EMPTY_HOSTS_RE.search(joined):
+        warnings.append(
+            f"ALLOWED_HOSTS = [] em {where}: com DEBUG desligado o Django recusa todas as "
+            "requisições (Bad Request 400). Inclua o domínio e, para o healthcheck, 'localhost'."
+        )
+    has_whitenoise = "whitenoise" in app.dependencies
+    if not DJANGO_STATIC_ROOT_RE.search(joined):
+        warnings.append(
+            f"STATIC_ROOT não está definido em {where}: o collectstatic não roda no build e "
+            "CSS/JS do admin não serão servidos pelo gunicorn."
+        )
+    elif not has_whitenoise:
+        warnings.append(
+            "collectstatic não é executado pelo Dockerizer e o gunicorn não serve arquivos "
+            "estáticos: use whitenoise ou sirva STATIC_ROOT pelo nginx (rode "
+            "'python manage.py collectstatic' no build do seu Dockerfile)."
+        )
+    return warnings

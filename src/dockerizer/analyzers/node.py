@@ -33,6 +33,7 @@ LOCKFILES = (
     ("package-lock.json", PackageManager.NPM),
     ("npm-shrinkwrap.json", PackageManager.NPM),
 )
+NEXT_STANDALONE_RE = re.compile(r"""\boutput\s*:\s*['"`]standalone['"`]""")
 SKIP_PARTS = ("node_modules/", "dist/", "build/", ".next/", "coverage/", "test/", "tests/")
 
 
@@ -200,6 +201,12 @@ class NodeAnalyzer:
             port = SCRIPT_PORT_RE.search(scripts["dev"])
             process.dev_port = int(port.group(1)) if port else 3000
         app.evidence.append("Dependência 'next' em package.json")
+        for name in ("next.config.js", "next.config.mjs", "next.config.cjs", "next.config.ts"):
+            if self._has(name) and NEXT_STANDALONE_RE.search(self._read(name)):
+                app.next_standalone = True
+                app.evidence.append(f"{name} usa output: 'standalone' (imagem reduzida)")
+        prefix = join(self.app_dir, "public") + "/"
+        app.has_public_dir = any(f.startswith(prefix) for f in self.files.files)
         app.processes.append(process)
 
     def _spa(self, app: Application, scripts: dict[str, str]) -> None:

@@ -200,6 +200,10 @@ class DockerManager:
         )
         return result.stdout.split() if result.ok else []
 
+    def remove_image(self, name: str) -> CommandResult:
+        """Remove uma imagem construída pelo Dockerizer (nunca imagens base ou de terceiros)."""
+        return self._run(["docker", "image", "rm", name], mutating=True)
+
     def remove_volumes(self, names: list[str]) -> CommandResult:
         """Remove volumes nomeados. Usado exclusivamente por ``dockerizer purge``."""
         return self._run(

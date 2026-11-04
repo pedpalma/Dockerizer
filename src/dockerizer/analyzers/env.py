@@ -87,10 +87,20 @@ def is_host_machine(host: str | None) -> bool:
         return False
 
 
+# Configurações *sobre* segredos que não são segredos: duração, tamanho, algoritmo, flags e
+# caminhos (ex.: ACCESS_TOKEN_EXPIRE_MINUTES, PASSWORD_MIN_LENGTH, JWT_ALGORITHM).
+NOT_SECRET_RE = re.compile(
+    r"_(MINUTES|SECONDS|HOURS|DAYS|TTL|EXPIRE|EXPIRES|EXPIRY|EXPIRATION|LIFETIME|TIMEOUT|"
+    r"LENGTH|MIN_LENGTH|MAX_LENGTH|ALGORITHM|ALGORITHMS|ENABLED|DISABLED|REQUIRED|HEADER|"
+    r"PATH|FILE|DIR|COOKIE_NAME|PARAM|ROUNDS)$|_MUST_CHANGE_PASSWORD$",
+    re.IGNORECASE,
+)
+
+
 def is_sensitive(name: str, value: str | None = None) -> bool:
-    if SENSITIVE_RE.search(name):
-        return True
-    return bool(value and "://" in value and "@" in value)
+    if value and "://" in value and "@" in value:
+        return True  # URL com credenciais, qualquer que seja o nome
+    return bool(SENSITIVE_RE.search(name)) and not NOT_SECRET_RE.search(name)
 
 
 def is_public_build_var(name: str) -> bool:
