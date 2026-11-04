@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, NoReturn
@@ -11,7 +12,7 @@ import typer
 from dockerizer import __version__
 from dockerizer.analyzers.project import analyze_project
 from dockerizer.cli import i18n, ui
-from dockerizer.constants import COMPOSE_FILE, TOOL_DIR, compose_project_name
+from dockerizer.constants import COMPOSE_FILE, HOST_ENV_FILE, TOOL_DIR, compose_project_name
 from dockerizer.docker.manager import (
     DockerCommandError,
     DockerManager,
@@ -20,7 +21,14 @@ from dockerizer.docker.manager import (
 )
 from dockerizer.fs.changes import ChangeAction, apply_changes, plan_changes
 from dockerizer.generators.dockerfile import GenerationError
-from dockerizer.generators.plan import assign_ports, build_plan, port_is_free, previous_host_ports
+from dockerizer.generators.plan import (
+    assign_ports,
+    build_plan,
+    choose_publish_ip,
+    port_is_free,
+    previous_host_ports,
+    stale_host_env,
+)
 from dockerizer.models.architecture import Mode
 from dockerizer.reporting.report import write_reports
 from dockerizer.rollback.manager import (
@@ -127,6 +135,31 @@ def generated_paths(manifest: Manifest | None) -> list[str]:
     ]
 
 
+def _remove_images(docker: DockerManager, names: list[str], containers_removed: bool) -> None:
+    if not containers_removed:
+        ui.warn("Imagens não removidas: os containers do projeto não foram removidos.")
+        return
+    for name in sorted(set(names)):
+        result = docker.remove_image(name)
+        if result.dry_run:
+            continue
+        if result.ok:
+            ui.success(f"Imagem removida: {name}")
+        elif "No such image" in result.stderr or "No such image" in result.stdout:
+            ui.info(f"[dim]Imagem {name} já não existia.[/dim]")
+        else:
+            ui.warn(f"Imagem {name} não removida: {result.stderr.strip()}")
+
+
+def warn_stale_host_env(root: Path, manifest: Manifest) -> None:
+    stale = stale_host_env(root, manifest.host_env_sources)
+    if stale:
+        ui.warn(
+            f"{', '.join(stale)} mudou depois da geração de {HOST_ENV_FILE}: os containers ainda "
+            "usam os valores antigos. Rode 'dockerizer setup' para atualizá-lo."
+        )
+
+
 def require_manifest(store: ManifestStore) -> Manifest:
     manifest = load_manifest(store)
     if manifest is None:
@@ -207,14 +240,27 @@ def setup(
         ),
     ] = False,
     report: Report = False,
+    host_ip: Annotated[
+        str | None,
+        typer.Option(
+            "--host-ip",
+            help="Endereço do host em que as portas são publicadas (ex.: 127.0.0.1 ou 0.0.0.0). "
+            "Padrão: 127.0.0.1 se o projeto tem nginx, senão todas as interfaces.",
+        ),
+    ] = None,
 ) -> None:
     """Analisa o projeto, gera os arquivos Docker e valida a configuração."""
     root = project_root(path, path_opt)
     store = ManifestStore(root)
     manifest = load_manifest(store)
     mode = Mode.DEVELOPMENT if dev else Mode.PRODUCTION
+    if host_ip is not None:
+        try:
+            ipaddress.ip_address(host_ip)
+        except ValueError:
+            fail(f"--host-ip inválido: {host_ip}")
 
-    analysis = analyze_project(root, generated_paths(manifest))
+    analysis = analyze_project(root, generated_paths(manifest), mode)
     ui.show_analysis(analysis)
     if not analysis.applications:
         fail("Nada a containerizar.")
@@ -231,8 +277,15 @@ def setup(
     host_ports = ui.resolve_ports(assign_ports(analysis, mode, previous, PORT_CHECKER), yes)
     if host_ports is None:
         raise typer.Exit(ExitCode.ERROR)
+    publish_ip, publish_reason = choose_publish_ip(
+        analysis, host_ip, manifest.publish_ip if manifest else None
+    )
+    if publish_reason:
+        ui.info(f"[dim]{publish_reason}[/dim]")
     try:
-        plan = build_plan(analysis, root, mode, host_ports, store.load_credentials())
+        plan = build_plan(
+            analysis, root, mode, host_ports, store.load_credentials(), publish_ip=publish_ip
+        )
     except GenerationError as exc:
         fail(str(exc))
     changes = plan_changes(root, plan.files, manifest, force)
@@ -287,6 +340,9 @@ def setup(
     run_id = new_run_id()
     manifest = manifest or Manifest(project_name=analysis.project_name)
     manifest.answers = answers
+    manifest.host_env_sources = plan.host_env_sources
+    if host_ip is not None:
+        manifest.publish_ip = host_ip
     run = RunRecord(id=run_id, command="setup", mode=mode.value)
     manifest.runs.append(run)
     manifest.mode = mode.value
@@ -360,6 +416,7 @@ def up(path: PathArg = None, path_opt: PathOpt = None, dry_run: DryRun = False) 
     root = project_root(path, path_opt)
     store = ManifestStore(root)
     manifest = require_manifest(store)
+    warn_stale_host_env(root, manifest)
     docker = docker_for(root, manifest, manifest.project_name, dry_run=dry_run)
     # Se containers do projeto já existem, as portas ocupadas podem ser deles próprios.
     running = docker.cli_available() and bool(docker.project_containers())
@@ -441,6 +498,7 @@ def status(path: PathArg = None, path_opt: PathOpt = None) -> None:
 
     root = project_root(path, path_opt)
     manifest = require_manifest(ManifestStore(root))
+    warn_stale_host_env(root, manifest)
     last = manifest.runs[-1] if manifest.runs else None
     mode = {"production": "produção", "development": "desenvolvimento"}.get(
         manifest.mode or "", "—"
@@ -494,6 +552,13 @@ def rollback(
             help="Reverte também arquivos editados manualmente (a versão atual é salva em backup).",
         ),
     ] = False,
+    images: Annotated[
+        bool,
+        typer.Option(
+            "--images",
+            help="Remove também as imagens construídas pelo Dockerizer (não afeta imagens base).",
+        ),
+    ] = False,
 ) -> None:
     """Desfaz as alterações realizadas pela ferramenta (volumes são preservados)."""
     root = project_root(path, path_opt)
@@ -512,6 +577,8 @@ def rollback(
     result = execute_rollback(root, store, manifest, plan, docker, dry_run=dry_run)
     for message in result.docker_messages:
         ui.info(message)
+    if images and manifest.docker and manifest.docker.images:
+        _remove_images(docker, manifest.docker.images, result.docker_cleaned or dry_run)
     if dry_run:
         ui.info("[bold]Dry-run:[/bold] nenhuma alteração realizada.")
         if result.conflicts:

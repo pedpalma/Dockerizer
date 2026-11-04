@@ -85,7 +85,16 @@ ENV NODE_ENV=production{% if port %} \
     HOSTNAME=0.0.0.0{% endif %}
 
 WORKDIR /app
+{% if standalone %}
+# Saída "standalone" do Next.js: servidor mínimo, sem node_modules completo.
+COPY --from=build --chown=node:node /app/.next/standalone ./
+COPY --from=build --chown=node:node /app/.next/static ./.next/static
+{% if has_public %}
+COPY --from=build --chown=node:node /app/public ./public
+{% endif %}
+{% else %}
 COPY --from=build --chown=node:node /app ./
+{% endif %}
 {% if data_dirs %}
 # Diretórios de dados (volumes nomeados): criados com o dono certo para o volume herdá-lo.
 RUN mkdir -p {{ data_dirs | map("shell_quote") | join(" ") }} \

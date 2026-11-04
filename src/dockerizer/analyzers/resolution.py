@@ -203,6 +203,7 @@ def apply_answer(analysis: ProjectAnalysis, question: Question, answer: str) -> 
         else:
             service.decision = ServiceDecision.LOCAL
             service.reason = f"Novo container {label} confirmado pelo usuário."
+            service.replaces_host = True
         service.host_candidate = False
     elif kind == "broker":
         if answer not in ("redis", "rabbitmq", "externo"):

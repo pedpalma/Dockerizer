@@ -121,6 +121,8 @@ com `--path`. Sem nenhum dos dois, o diretório atual é usado.
 | `--start` | `setup` | Inicia os serviços. |
 | `--dev` / `--production` | `setup` | Ambiente de desenvolvimento ou de produção (padrão). |
 | `--report` | `analyze`, `setup` | Gera relatório (Markdown e JSON) em `.dockerizer/reports/`. |
+| `--host-ip` | `setup` | Endereço em que as portas são publicadas (ex.: `127.0.0.1`, `0.0.0.0`). Padrão: `127.0.0.1` se o projeto tem nginx, senão todas as interfaces. A escolha é lembrada. |
+| `--images` | `rollback` | Remove também as imagens construídas pelo Dockerizer (nunca imagens base). |
 
 ## O que é gerado
 
@@ -139,6 +141,12 @@ Decisões de segurança do Compose gerado:
 - Bancos, cache e filas ficam numa rede **interna** (`data`, sem acesso externo) e **não são
   publicados no host**. Somente as aplicações web expõem portas.
 - Se uma porta do host estiver ocupada, a próxima livre é proposta.
+- Com nginx no projeto, as portas são publicadas só em `127.0.0.1`: publicá-las em todas as
+  interfaces deixaria a aplicação acessível direto pela porta, sem TLS, limites ou
+  autenticação do proxy.
+- Healthchecks: se o código tem uma rota de saúde (`/health`, `/healthz`, `/ping`, rotas
+  `api/health` do Next.js...), o teste é uma requisição HTTP (sem seguir redirecionamentos;
+  qualquer status abaixo de 500 é saudável); senão, a porta TCP.
 - Containers de aplicação usam `no-new-privileges`, `init` e usuário não root.
 - Senhas vêm do `.env` via interpolação obrigatória (`${VAR:?}`), nunca do Dockerfile.
 - Migrações (Alembic/Django) rodam num serviço próprio antes da aplicação **apenas quando o
@@ -170,10 +178,22 @@ instalado no servidor, com os dados reais. O Dockerizer pergunta, sem resposta p
 - `container`: cria um serviço novo, com volume **vazio** (os dados atuais não são copiados).
 
 As respostas ficam em `.dockerizer/manifest.json` e são reaproveitadas pelos próximos
-`setup` (inclusive com `--yes`).
+`setup` (inclusive com `--yes`). Se o `.env` mudar depois, `up` e `status` avisam que o
+`.env.docker` ficou desatualizado. Ao escolher `container` no lugar do banco do host, o
+`setup` mostra os comandos `pg_dump`/`pg_restore` (ou `mysqldump`) para copiar os dados —
+eles nunca são executados pelo Dockerizer.
 
 ### Projetos que já rodam fora do Docker
 
+- **Compose existente**: Dockerfile, contexto e `target` de build de cada aplicação são
+  reaproveitados, inclusive Dockerfiles fora da pasta da aplicação (ex.:
+  `infra/docker/backend/Dockerfile` com contexto na raiz). Serviços que executam a imagem da
+  aplicação (`image:` igual, `build:` próprio ou `extends`) viram processos com o mesmo
+  `command:` (workers, pollers); serviços de migração viram a etapa de migração e serviços
+  `restart: "no"` são apenas listados. Em produção, `docker-compose.prod.yml` tem prioridade;
+  em desenvolvimento, o arquivo base, e comandos com reload viram o comando de
+  desenvolvimento. Comandos com interpolação (`${VAR}`) são ignorados; `$$` é tratado como o
+  `$` literal que chega ao container.
 - **Comandos de produção**: units do systemd (`*.service`, `ExecStart=`), programas do
   supervisor (`[program:x]`) e o `ecosystem.config.js`/`ecosystem.json` do pm2 são lidos (nunca
   executados) e têm a mesma precedência do `Procfile`, que prevalece sobre eles. Os comandos
@@ -262,16 +282,17 @@ interna bloqueia `docker compose down -v` e remoção de volumes fora do comando
 - Pipenv, Ruby, Go, Java e outras tecnologias não são suportados nesta versão.
 - Monorepos com *workspaces* (npm/pnpm/yarn) têm suporte limitado; Yarn PnP não é suportado
   (use `nodeLinker: node-modules`).
-- Os healthchecks das aplicações verificam a porta TCP, não um endpoint HTTP específico.
-- Django: `collectstatic`, `ALLOWED_HOSTS` e `DEBUG` não são configurados automaticamente.
-- Next.js usa `next start` (o modo `output: "standalone"` não é aproveitado, gerando imagens
-  maiores).
+- Django: `collectstatic`, `ALLOWED_HOSTS` e `DEBUG` não são configurados automaticamente
+  (a análise avisa quando a configuração atual quebraria ou exporia a aplicação).
+- Next.js com `output: "standalone"` gera uma imagem reduzida (`node server.js`); sem ele, a
+  imagem usa `next start` com as dependências de produção.
+- Dockerfiles existentes não recebem healthcheck nem são alterados; com contexto de build
+  diferente da pasta da aplicação, o código não é montado no modo `--dev`.
 - Dependências extraídas de `pyproject.toml` sem lockfile são copiadas para o Dockerfile:
   rode `dockerizer setup` novamente quando elas mudarem.
 - No modo `--dev`, o container Python roda com UID 10001: arquivos criados pelo container no
   código montado podem ficar com outro dono.
-- O rollback remove containers e redes, mas não as imagens construídas. Para removê-las:
-  `docker image rm <projeto>-<aplicação>`.
+- O rollback remove containers e redes; as imagens construídas só com `rollback --images`.
 - URLs de conexão montadas pelo Compose assumem senhas sem caracteres especiais de URL (as
   geradas pelo Dockerizer já seguem essa regra).
 - Projetos muito grandes são analisados até 20.000 arquivos e 8 níveis de diretório.
@@ -289,7 +310,7 @@ src/dockerizer/
 ├── cli/            # comandos (Typer), apresentação (Rich), tradução da ajuda
 ├── scanner/        # descoberta de arquivos e raízes de aplicações
 ├── analyzers/      # Python, Node.js, infraestrutura, variáveis, perguntas, systemd/
-│                   # supervisor/pm2, nginx e diretórios de dados
+│                   # supervisor/pm2, Compose existente, nginx, rotas de saúde e dados
 ├── models/         # modelo de domínio (Pydantic)
 ├── generators/     # Dockerfile, Compose, .env, plano de geração
 ├── templates/      # templates Jinja2

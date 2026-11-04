@@ -6,8 +6,10 @@ import re
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 
+from dockerizer.analyzers.compose_import import import_from_compose
 from dockerizer.analyzers.datadirs import detect_data_dirs
 from dockerizer.analyzers.env import IGNORED_ENV, is_sensitive, parse_env_file
+from dockerizer.analyzers.health import detect_health_routes
 from dockerizer.analyzers.infrastructure import SPECS, InfrastructureAnalyzer
 from dockerizer.analyzers.nginx import analyze_nginx
 from dockerizer.analyzers.node import NodeAnalyzer
@@ -22,6 +24,7 @@ from dockerizer.models.architecture import (
     EnvVar,
     ExistingDockerFile,
     Language,
+    Mode,
     ProjectAnalysis,
 )
 from dockerizer.scanner.discovery import (
@@ -62,7 +65,9 @@ def _unique(name: str, used: set[str]) -> str:
     return candidate
 
 
-def analyze_project(root: Path, managed_paths: Iterable[str] = ()) -> ProjectAnalysis:
+def analyze_project(
+    root: Path, managed_paths: Iterable[str] = (), mode: Mode = Mode.PRODUCTION
+) -> ProjectAnalysis:
     """Analisa o projeto em ``root`` sem modificá-lo nem executar nada dele.
 
     ``managed_paths`` são arquivos gerados anteriormente pelo Dockerizer; eles são ignorados
@@ -103,15 +108,18 @@ def analyze_project(root: Path, managed_paths: Iterable[str] = ()) -> ProjectAna
     analysis.languages = sorted({a.language for a in analysis.applications}, key=str)
     analysis.env_vars = _collect_env(files, analysis.applications, analysis.env_files)
 
+    compose_files = [rel for rel, kind in docker_files if kind == "compose" and rel not in managed]
+    compose_definitions = import_from_compose(files, analysis, compose_files, managed, mode)
     definitions, manager_notes = find_process_definitions(files)
-    apply_process_definitions(analysis, definitions)
+    # O Compose existente descreve a execução em containers: aplicado por último, prevalece.
+    apply_process_definitions(analysis, definitions + compose_definitions)
     analysis.notes.extend(manager_notes)
 
-    compose_files = [rel for rel, kind in docker_files if kind == "compose" and rel not in managed]
     infra = InfrastructureAnalyzer(files, analysis.applications, analysis.env_files, compose_files)
     analysis.services = infra.analyze()
     analysis.notes.extend(infra.notes)
     detect_data_dirs(files, analysis)
+    detect_health_routes(files, analysis.applications)
     analyze_nginx(files, analysis)
     for script in analysis.init_scripts:
         analysis.notes.append(f"Script de inicialização encontrado (não executado): {script}")

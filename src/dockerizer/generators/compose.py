@@ -6,6 +6,7 @@ válido); o template Jinja2 adiciona apenas o cabeçalho explicativo.
 
 from __future__ import annotations
 
+import posixpath
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -148,6 +149,23 @@ def service_names(app: Application) -> dict[str, str]:
     return names
 
 
+def compose_argv(argv: list[str]) -> list[str]:
+    """Escapa "$" para o Compose não interpolar o que deve chegar ao shell do container."""
+    return [arg.replace("$", "$$") for arg in argv]
+
+
+def build_section(app: Application) -> dict[str, Any]:
+    """Contexto e Dockerfile: os do Compose existente, quando declarados, ou os da aplicação."""
+    context = app.build_context or app.path
+    dockerfile = "Dockerfile"
+    if app.existing_dockerfile:
+        dockerfile = posixpath.relpath(app.existing_dockerfile, context)
+    build: dict[str, Any] = {"context": context, "dockerfile": dockerfile}
+    if app.build_target:
+        build["target"] = app.build_target
+    return build
+
+
 def migrate_service_name(app: Application) -> str:
     return f"{app.name}-migrate"
 
@@ -282,6 +300,8 @@ def app_connections(
 def _app_healthcheck(app: Application, process: Process, port: int | None) -> dict[str, Any] | None:
     if process.kind is ProcessKind.STATIC:
         return _healthcheck(["CMD", "wget", "-q", "--spider", f"http://127.0.0.1:{port}/"], "10s")
+    if process.kind is ProcessKind.WEB and port and process.health_path:
+        return _healthcheck(_http_check(app, port, process.health_path))
     if process.kind is ProcessKind.WEB and port:
         if app.language is Language.PYTHON:
             code = f"import socket; socket.create_connection(('127.0.0.1', {port}), timeout=3)"
@@ -303,6 +323,23 @@ def _app_healthcheck(app: Application, process: Process, port: int | None) -> di
     return None
 
 
+def _http_check(app: Application, port: int, path: str) -> list[str]:
+    """Requisição HTTP sem seguir redirecionamentos; qualquer status abaixo de 500 é saudável."""
+    if app.language is Language.PYTHON:
+        code = (
+            "import http.client, sys\n"
+            f"conn = http.client.HTTPConnection('127.0.0.1', {port}, timeout=3)\n"
+            f"conn.request('GET', {path!r})\n"
+            "sys.exit(0 if conn.getresponse().status < 500 else 1)"
+        )
+        return ["CMD", "python", "-c", code]
+    code = (
+        f"require('http').get({{host:'127.0.0.1',port:{port},path:{path!r},timeout:3000}},"
+        "r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))"
+    )
+    return ["CMD", "node", "-e", code]
+
+
 def _dev_process_kind(process: Process, mode: Mode) -> ProcessKind:
     if mode is Mode.DEVELOPMENT and process.kind is ProcessKind.STATIC:
         return ProcessKind.WEB
@@ -314,6 +351,7 @@ def build_compose(
     mode: Mode,
     host_ports: dict[str, int],
     app_env_files: dict[str, list[str]],
+    publish_ip: str | None = None,
 ) -> ComposeResult:
     project = compose_project_name(analysis.project_name)
     local = analysis.local_services()
@@ -352,13 +390,18 @@ def build_compose(
         data_mounts = [f"{d.volume}:{d.path}" for d in app.data_dirs]
         for data_dir in app.data_dirs:
             volumes.append(data_dir.volume)
+        if mode is Mode.DEVELOPMENT and app.build_context not in (None, app.path):
+            warnings.append(
+                f"'{app.name}' usa um Dockerfile com contexto '{app.build_context}': o código não "
+                "é montado no container em desenvolvimento (o layout da imagem é desconhecido)."
+            )
         if app.data_dirs and app.existing_dockerfile:
             warnings.append(
                 f"Dockerfile existente de '{app.name}': garanta que "
                 f"{', '.join(d.path for d in app.data_dirs)} exista(m) na imagem com dono igual "
                 "ao usuário da aplicação; senão o volume é montado como root e a escrita falha."
             )
-        build: dict[str, Any] = {"context": app.path, "dockerfile": "Dockerfile"}
+        build = build_section(app)
         if app.build_args and mode is Mode.PRODUCTION:
             build["args"] = {arg: f"${{{arg}:-}}" for arg in app.build_args}
         env_files = [{"path": f, "required": False} for f in app_env_files.get(app.name, [])]
@@ -368,7 +411,7 @@ def build_compose(
             migrate_name = migrate_service_name(app)
             services[migrate_name] = _base_app_service(
                 image, build, env_files, env, depends, needs_data, mode, app, uses_host
-            ) | {"command": app.migration.command, "restart": "no"}
+            ) | {"command": compose_argv(app.migration.command), "restart": "no"}
         elif app.migration:
             warnings.append(
                 f"Migrações de '{app.name}' ({app.migration.tool}) detectadas, mas o banco não é "
@@ -389,13 +432,22 @@ def build_compose(
                     migrate_name: {"condition": "service_completed_successfully"},
                 }
             command = process.command_for(mode)
-            if process is not main and command is not None:
-                definition["command"] = command.argv
+            # O Dockerfile existente define o CMD de produção; em desenvolvimento, o comando com
+            # reload precisa ser explícito.
+            dev_override = (
+                process is main
+                and app.existing_dockerfile is not None
+                and mode is Mode.DEVELOPMENT
+                and process.dev_command is not None
+            )
+            if command is not None and (process is not main or dev_override):
+                definition["command"] = compose_argv(command.argv)
             kind = _dev_process_kind(process, mode)
             port = process.port_for(mode)
             if kind in (ProcessKind.WEB, ProcessKind.STATIC) and port:
                 host = host_ports.get(name, port)
-                definition["ports"] = [f"{host}:{port}"]
+                prefix = f"{publish_ip}:" if publish_ip else ""
+                definition["ports"] = [f"{prefix}{host}:{port}"]
                 ports.append(PortBinding(name, port, host))
                 if app.language is Language.NODE and kind is ProcessKind.WEB:
                     definition["environment"] = {
@@ -449,7 +501,7 @@ def _base_app_service(
         definition["environment"] = dict(env)
     if depends:
         definition["depends_on"] = dict(depends)
-    if mode is Mode.DEVELOPMENT:
+    if mode is Mode.DEVELOPMENT and app.build_context in (None, app.path):
         volumes = [f"./{app.path}:/app" if app.path != "." else ".:/app"]
         if app.language is Language.NODE:
             volumes.append("/app/node_modules")

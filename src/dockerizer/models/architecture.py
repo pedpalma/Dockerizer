@@ -87,6 +87,7 @@ class Process(BaseModel):
     dev_port: int | None = None
     candidates: list[Command] = Field(default_factory=list)
     celery_app: str | None = None
+    health_path: str | None = None  # rota HTTP para o healthcheck (ex.: /health)
 
     def command_for(self, mode: Mode) -> Command | None:
         if mode is Mode.DEVELOPMENT and self.dev_command is not None:
@@ -130,6 +131,9 @@ class Application(BaseModel):
     evidence: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     existing_dockerfile: str | None = None
+    # Contexto/target de build declarados num Compose existente (padrão: a pasta da aplicação).
+    build_context: str | None = None
+    build_target: str | None = None
     data_dirs: list[DataDir] = Field(default_factory=list)
 
     # Python
@@ -144,6 +148,8 @@ class Application(BaseModel):
     yarn_berry: bool = False
     build_command: list[str] | None = None
     static_output_dir: str | None = None
+    next_standalone: bool = False  # next.config com output: "standalone"
+    has_public_dir: bool = False
 
     def has_framework(self, framework: Framework) -> bool:
         return framework in self.frameworks
@@ -195,6 +201,8 @@ class InfraService(BaseModel):
     # Decidido como local só porque o .env real aponta para localhost: pode ser um serviço
     # já instalado na máquina, e não um container a criar. Exige confirmação.
     host_candidate: bool = False
+    # Container novo escolhido no lugar de um serviço que já roda no host (dados não copiados).
+    replaces_host: bool = False
 
 
 class EnvVar(BaseModel):

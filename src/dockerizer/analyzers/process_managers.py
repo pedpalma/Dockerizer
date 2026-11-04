@@ -73,6 +73,8 @@ class ProcessDefinition:
     env: dict[str, str] = field(default_factory=dict)
     instances: int | None = None
     warnings: list[str] = field(default_factory=list)
+    app: str | None = None  # aplicação já conhecida (ex.: serviço do Compose que a constrói)
+    dev: bool = False  # comando de desenvolvimento (reload): vira dev_command, não o principal
 
     @property
     def source(self) -> str:
@@ -487,6 +489,21 @@ def _match_app(definition: ProcessDefinition, apps: list[Application]) -> Applic
     return None
 
 
+def effective_argv(argv: list[str]) -> list[str]:
+    """O comando que de fato roda: ``sh -c 'prep && exec uvicorn ...'`` → ``uvicorn ...``."""
+    if len(argv) >= 3 and PurePosixPath(argv[0]).name in ("sh", "bash") and "-c" in argv:
+        script = argv[argv.index("-c") + 1] if argv.index("-c") + 1 < len(argv) else ""
+        segments = re.split(r"&&|;|\n", script.replace("\\\n", " "))
+        filled = [segment.strip() for segment in segments if segment.strip()]
+        last = filled[-1] if filled else ""
+        last = re.sub(r"^exec\s+", "", last)
+        try:
+            return shlex.split(last) or argv
+        except ValueError:
+            return argv
+    return argv
+
+
 def _kind(program: str, argv: list[str], app: Application) -> tuple[str, ProcessKind]:
     """Nome e tipo do processo no Dockerizer."""
     if program == "celery":
@@ -505,6 +522,18 @@ def _kind(program: str, argv: list[str], app: Application) -> tuple[str, Process
     return "", ProcessKind.WORKER
 
 
+def _celery_app(argv: list[str]) -> str | None:
+    if program_of(argv) != "celery":
+        return None
+    for flag in ("-A", "--app"):
+        if flag in argv and argv.index(flag) + 1 < len(argv):
+            return argv[argv.index(flag) + 1]
+    for arg in argv:
+        if arg.startswith("--app="):
+            return arg.split("=", 1)[1]
+    return None
+
+
 def _slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "processo"
 
@@ -519,7 +548,11 @@ def apply_process_definitions(
                 f"{definition.source}: '{program}' não é processo da aplicação; ignorado."
             )
             continue
-        app = _match_app(definition, analysis.applications)
+        app = (
+            analysis.app(definition.app)
+            if definition.app
+            else _match_app(definition, analysis.applications)
+        )
         if app is None:
             analysis.notes.append(
                 f"{definition.source}: não foi possível associar a uma aplicação; ignorado."
@@ -529,8 +562,21 @@ def apply_process_definitions(
         if not argv:
             continue
         app.warnings.extend(definition.warnings)
-        name, kind = _kind(program_of(argv), argv, app)
+        effective = effective_argv(argv)
+        name, kind = _kind(program_of(effective), effective, app)
         command = Command(argv=argv, source=definition.source)
+        if definition.dev:
+            target = app.process(name) if name else None
+            if kind is ProcessKind.WEB:
+                target = next(
+                    (p for p in app.processes if p.kind in (ProcessKind.WEB, ProcessKind.STATIC)),
+                    None,
+                )
+            if target is not None:
+                target.dev_command = command
+                if port:
+                    target.dev_port = port
+            continue
         existing = app.process(name) if name else None
         if (
             existing is not None
@@ -553,6 +599,9 @@ def apply_process_definitions(
         elif existing is not None:
             existing.command = command
             existing.candidates = []
+            celery_target = _celery_app(effective)
+            if celery_target:
+                existing.celery_app = celery_target  # healthcheck "inspect ping" usa o app real
         else:
             base = _slug(definition.name)
             unique = base
@@ -560,15 +609,11 @@ def apply_process_definitions(
             while app.process(unique):
                 unique = f"{base}-{counter}"
                 counter += 1
-            celery_app = None
-            if program_of(argv) == "celery" and "-A" in argv:
-                celery_app = (
-                    argv[argv.index("-A") + 1] if argv.index("-A") + 1 < len(argv) else None
-                )
+            celery_app = _celery_app(effective)
             app.processes.append(
                 Process(name=name or unique, kind=kind, command=command, celery_app=celery_app)
             )
-            if program_of(argv) == "celery" and Framework.CELERY not in app.frameworks:
+            if program_of(effective) == "celery" and Framework.CELERY not in app.frameworks:
                 app.frameworks.append(Framework.CELERY)
         clustered = any("modo cluster" in w for w in definition.warnings)
         if definition.instances and definition.instances > 1 and not clustered:

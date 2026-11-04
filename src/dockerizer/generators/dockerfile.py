@@ -125,8 +125,17 @@ def _node(app: Application, mode: Mode, process: Process, existing: set[str]) ->
         rel = str(PurePosixPath(app.path) / extra) if app.path != "." else extra
         if rel in existing:
             install_files.append(extra)
+    standalone = app.next_standalone and not dev and not static
+    if standalone:
+        # O build standalone traz só o necessário e um server.js próprio; "next start" não
+        # funciona nele (não há node_modules completo).
+        argv = ["node", "server.js"]
     prune = None
-    if not dev and not (app.package_manager is PackageManager.YARN and app.yarn_berry):
+    if (
+        not dev
+        and not standalone
+        and not (app.package_manager is PackageManager.YARN and app.yarn_berry)
+    ):
         prune = NODE_PRUNE[app.package_manager]
     port = process.port_for(mode)
     return render(
@@ -145,6 +154,8 @@ def _node(app: Application, mode: Mode, process: Process, existing: set[str]) ->
         port=port,
         command=argv,
         data_dirs=[d.path for d in app.data_dirs],
+        standalone=standalone,
+        has_public=app.has_public_dir,
     )
 
 
