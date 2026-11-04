@@ -1,0 +1,226 @@
+"""Interação com Docker CLI e Docker Compose.
+
+- Comandos são executados como lista de argumentos (sem shell), com timeout.
+- Toda operação é restrita ao projeto Compose registrado (``-p <projeto>`` ou filtro por label).
+- Operações globais (``prune``) e remoção de volumes fora do fluxo explícito de ``purge`` são
+  bloqueadas por uma guarda, mesmo que algum chamador tente executá-las.
+- Em dry-run, comandos que alteram estado são apenas exibidos.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Protocol
+
+from dockerizer.constants import COMPOSE_FILE, COMPOSE_PROJECT_LABEL
+
+DEFAULT_TIMEOUT = 30.0
+LONG_TIMEOUT: float | None = None  # build/up podem demorar; interrompíveis com Ctrl+C
+
+
+@dataclass
+class CommandResult:
+    args: list[str]
+    returncode: int
+    stdout: str = ""
+    stderr: str = ""
+    dry_run: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return self.returncode == 0
+
+
+class Runner(Protocol):
+    def __call__(
+        self, args: Sequence[str], *, capture: bool, timeout: float | None, cwd: Path
+    ) -> CommandResult: ...
+
+
+def subprocess_runner(
+    args: Sequence[str], *, capture: bool, timeout: float | None, cwd: Path
+) -> CommandResult:
+    argv = list(args)
+    try:
+        proc = subprocess.run(
+            argv, cwd=cwd, capture_output=capture, text=True, timeout=timeout, check=False
+        )
+    except FileNotFoundError:
+        return CommandResult(argv, 127, "", f"Executável não encontrado: {argv[0]}")
+    except subprocess.TimeoutExpired:
+        return CommandResult(argv, 124, "", f"Tempo esgotado ao executar: {' '.join(argv)}")
+    return CommandResult(argv, proc.returncode, proc.stdout or "", proc.stderr or "")
+
+
+class UnsafeDockerOperation(Exception):
+    """Tentativa de executar operação Docker global ou destrutiva fora do fluxo autorizado."""
+
+
+def guard(args: Sequence[str], allow_volume_removal: bool = False) -> None:
+    tokens = set(args)
+    if "prune" in tokens:
+        raise UnsafeDockerOperation("Operações 'prune' nunca são executadas pelo Dockerizer.")
+    if "compose" in tokens and "down" in tokens and tokens & {"-v", "--volumes", "--rmi"}:
+        raise UnsafeDockerOperation("'docker compose down' com remoção de volumes é bloqueado.")
+    is_volume_rm = len(args) >= 3 and args[1] == "volume" and args[2] in ("rm", "remove")
+    if is_volume_rm and not allow_volume_removal:
+        raise UnsafeDockerOperation("Remoção de volumes só é permitida pelo comando 'purge'.")
+
+
+class DockerManager:
+    def __init__(
+        self,
+        root: Path,
+        project: str,
+        compose_file: str = COMPOSE_FILE,
+        runner: Runner | None = None,
+        dry_run: bool = False,
+        on_command: Callable[[list[str], bool], None] | None = None,
+    ) -> None:
+        self.root = root.resolve()
+        self.project = project
+        self.compose_file = compose_file
+        self.runner: Runner = runner or subprocess_runner
+        self.dry_run = dry_run
+        self.on_command = on_command
+
+    # -- execução -------------------------------------------------------------------------
+    def _run(
+        self,
+        args: list[str],
+        *,
+        mutating: bool,
+        capture: bool = True,
+        timeout: float | None = DEFAULT_TIMEOUT,
+        allow_volume_removal: bool = False,
+    ) -> CommandResult:
+        guard(args, allow_volume_removal=allow_volume_removal)
+        if self.on_command and (mutating or not capture):
+            self.on_command(args, self.dry_run and mutating)
+        if self.dry_run and mutating:
+            return CommandResult(args, 0, dry_run=True)
+        return self.runner(args, capture=capture, timeout=timeout, cwd=self.root)
+
+    def compose_args(self, *args: str) -> list[str]:
+        return [
+            "docker",
+            "compose",
+            "--project-directory",
+            str(self.root),
+            "-f",
+            str(self.root / self.compose_file),
+            "-p",
+            self.project,
+            *args,
+        ]
+
+    # -- ambiente -------------------------------------------------------------------------
+    def cli_available(self) -> bool:
+        if shutil.which("docker") is None and self.runner is subprocess_runner:
+            return False
+        return self._run(["docker", "compose", "version"], mutating=False).ok
+
+    def daemon_running(self) -> bool:
+        result = self._run(["docker", "info", "--format", "{{.ServerVersion}}"], mutating=False)
+        return result.ok
+
+    # -- compose --------------------------------------------------------------------------
+    def config(self) -> CommandResult:
+        return self._run(self.compose_args("config", "--quiet"), mutating=False)
+
+    def build(self) -> CommandResult:
+        return self._run(
+            self.compose_args("build"), mutating=True, capture=False, timeout=LONG_TIMEOUT
+        )
+
+    def up(self) -> CommandResult:
+        return self._run(
+            self.compose_args("up", "--detach"), mutating=True, capture=False, timeout=LONG_TIMEOUT
+        )
+
+    def down(self) -> CommandResult:
+        """Para e remove containers e redes do projeto. Volumes nunca são removidos."""
+        return self._run(
+            self.compose_args("down", "--remove-orphans"),
+            mutating=True,
+            capture=False,
+            timeout=LONG_TIMEOUT,
+        )
+
+    def logs(self, service: str | None, follow: bool, tail: int) -> CommandResult:
+        args = self.compose_args("logs", "--tail", str(tail))
+        if follow:
+            args.append("--follow")
+        if service:
+            args.append(service)
+        return self._run(args, mutating=False, capture=False, timeout=LONG_TIMEOUT)
+
+    def ps(self) -> list[dict[str, Any]]:
+        result = self._run(self.compose_args("ps", "--all", "--format", "json"), mutating=False)
+        if not result.ok:
+            raise DockerCommandError(result)
+        return parse_json_lines(result.stdout)
+
+    # -- recursos por label (independem do compose.yaml existir) ---------------------------
+    def _label_filter(self) -> list[str]:
+        return ["--filter", f"label={COMPOSE_PROJECT_LABEL}={self.project}"]
+
+    def project_containers(self) -> list[str]:
+        result = self._run(
+            ["docker", "ps", "--all", "--quiet", *self._label_filter()], mutating=False
+        )
+        return result.stdout.split() if result.ok else []
+
+    def remove_containers(self, ids: list[str]) -> CommandResult:
+        return self._run(["docker", "rm", "--force", *ids], mutating=True)
+
+    def project_networks(self) -> list[str]:
+        result = self._run(
+            ["docker", "network", "ls", "--quiet", *self._label_filter()], mutating=False
+        )
+        return result.stdout.split() if result.ok else []
+
+    def remove_networks(self, ids: list[str]) -> CommandResult:
+        return self._run(["docker", "network", "rm", *ids], mutating=True)
+
+    def project_volumes(self) -> list[str]:
+        result = self._run(
+            ["docker", "volume", "ls", "--quiet", *self._label_filter()], mutating=False
+        )
+        return result.stdout.split() if result.ok else []
+
+    def remove_volumes(self, names: list[str]) -> CommandResult:
+        """Remove volumes nomeados. Usado exclusivamente por ``dockerizer purge``."""
+        return self._run(
+            ["docker", "volume", "rm", *names], mutating=True, allow_volume_removal=True
+        )
+
+
+class DockerCommandError(Exception):
+    def __init__(self, result: CommandResult) -> None:
+        self.result = result
+        detail = (result.stderr or result.stdout).strip()
+        super().__init__(f"Falha ao executar {' '.join(result.args[:4])}...: {detail}")
+
+
+def parse_json_lines(text: str) -> list[dict[str, Any]]:
+    """``docker compose ps --format json`` gera um array (versões antigas) ou NDJSON."""
+    text = text.strip()
+    if not text:
+        return []
+    if text.startswith("["):
+        data = json.loads(text)
+        return [d for d in data if isinstance(d, dict)]
+    items = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            parsed = json.loads(line)
+            if isinstance(parsed, dict):
+                items.append(parsed)
+    return items
