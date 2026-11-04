@@ -25,6 +25,15 @@ FIELD_RE = re.compile(r"^(\s+)([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([^=\s][^=]*)")
 ALIAS_RE = re.compile(r"\b(?:validation_)?alias\s*=\s*[\"']([A-Za-z_][A-Za-z0-9_]*)[\"']")
 ENV_PREFIX_RE = re.compile(r"\benv_prefix\s*=\s*[\"']([A-Za-z0-9_]*)[\"']")
 ANNOTATION_NAMES_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Valor padrão literal: os.getenv("X", "valor") / os.environ.get("X", "valor").
+PY_ENV_DEFAULT_RE = re.compile(
+    r"os\.(?:environ\.get|getenv)\(\s*[\"']([A-Z_][A-Z0-9_]*)[\"']\s*,\s*"
+    r"(?:Path\(\s*)?[\"']([^\"']+)[\"']"
+)
+# Padrão de campo BaseSettings: = "x", = Path("x"), Field(default="x") ou Field("x").
+FIELD_DEFAULT_RE = re.compile(
+    r"=\s*(?:Path\(\s*|Field\(\s*(?:default\s*=\s*)?(?:Path\(\s*)?)?[\"']([^\"']*)[\"']"
+)
 
 # Variáveis do sistema/runtime que não fazem sentido em .env.example.
 IGNORED_ENV = frozenset(
@@ -62,6 +71,20 @@ URL_RE = re.compile(
 ENV_LINE_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
 PUBLIC_PREFIXES = ("NEXT_PUBLIC_", "VITE_", "REACT_APP_")
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "0.0.0.0", "::1", "host.docker.internal"})
+# Hosts que, num .env usado fora do Docker, significam "serviço instalado nesta máquina".
+HOST_MACHINE_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def is_host_machine(host: str | None) -> bool:
+    if not host:
+        return False
+    host = host.strip().strip("[]").lower()
+    if host in HOST_MACHINE_HOSTS:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def is_sensitive(name: str, value: str | None = None) -> bool:
@@ -104,13 +127,22 @@ def python_env_refs(source: str) -> set[str]:
     return names
 
 
-def _basesettings_fields(source: str) -> set[str]:
+def python_env_defaults(source: str) -> dict[str, str]:
+    """Valores padrão literais das variáveis lidas pelo código (sem executar nada)."""
+    defaults = {k: v for k, v in _basesettings_fields(source).items() if v is not None}
+    for name, value in PY_ENV_DEFAULT_RE.findall(source):
+        if _valid(name):
+            defaults.setdefault(name, value)
+    return defaults
+
+
+def _basesettings_fields(source: str) -> dict[str, str | None]:
     """Campos de classes ``BaseSettings``, com o ``env_prefix`` aplicado.
 
     Campos cujo tipo é outra classe ``BaseSettings`` do mesmo arquivo são subconfigurações
     aninhadas (lidas com o prefixo da própria classe), não variáveis de ambiente.
     """
-    names: set[str] = set()
+    names: dict[str, str | None] = {}
     lines = source.splitlines()
     matches = list(BASESETTINGS_RE.finditer(source))
     settings_classes = {m.group(1) for m in matches}
@@ -131,8 +163,18 @@ def _basesettings_fields(source: str) -> set[str]:
             alias = ALIAS_RE.search(text)
             name = alias.group(1).upper() if alias else f"{prefix}{field_name}".upper()
             if name not in IGNORED_ENV:
-                names.add(name)
+                names[name] = _field_default(text)
     return names
+
+
+def _field_default(text: str) -> str | None:
+    """Padrão literal do campo: só a primeira atribuição conta (ignora ``alias="..."``)."""
+    after_annotation = text.split(":", 1)[1] if ":" in text else ""
+    index = after_annotation.find("=")
+    if index < 0:
+        return None
+    match = FIELD_DEFAULT_RE.match(after_annotation[index:])
+    return match.group(1) if match else None
 
 
 def _class_fields(body: list[str]) -> list[tuple[str, str, str]]:

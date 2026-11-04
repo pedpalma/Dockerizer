@@ -8,6 +8,7 @@ from dockerizer.analyzers.infrastructure import SPECS, has_usage_signal
 from dockerizer.models.architecture import (
     Command,
     Confidence,
+    EvidenceStrength,
     Framework,
     InfraService,
     ProcessKind,
@@ -20,6 +21,8 @@ from dockerizer.models.architecture import (
 
 YES = "sim"
 NO = "nao"
+CONTAINER = "container"
+HOST = "host"
 
 
 class AnswerError(ValueError):
@@ -72,6 +75,8 @@ def build_questions(analysis: ProjectAnalysis) -> list[Question]:
     for service in analysis.services:
         if service.decision is ServiceDecision.UNDETERMINED:
             questions.append(_service_question(service))
+        elif service.decision is ServiceDecision.LOCAL and service.host_candidate:
+            questions.append(_host_question(service))
     questions.extend(_broker_questions(analysis))
     return questions
 
@@ -88,6 +93,33 @@ def _service_question(service: InfraService) -> Question:
         default=YES if has_usage_signal(service) else NO,
         help=f"{service.reason} Evidências: {evidence}. "
         "Responda 'nao' se o projeto utiliza um serviço externo ou não precisa dele.",
+    )
+
+
+def _host_question(service: InfraService) -> Question:
+    label = SPECS[service.kind].label
+    sources = sorted(
+        {
+            e.source
+            for e in service.evidence
+            if e.host_machine and e.strength is EvidenceStrength.STRONG
+        }
+    )
+    return Question(
+        id=f"host:{service.kind.value}",
+        kind=QuestionKind.CHOICE,
+        prompt=(
+            f"{', '.join(sources)} aponta o {label} para esta máquina (localhost). "
+            f"Usar o {label} que já roda no host ou criar um container novo?"
+        ),
+        target=f"host:{service.kind.value}",
+        choices=[HOST, CONTAINER],
+        # Sem padrão: as duas respostas erradas são ruins (banco vazio ou conexão recusada).
+        default=None,
+        help=f"'{HOST}': os containers acessam o serviço existente via host.docker.internal; "
+        "os dados continuam onde estão, mas o serviço precisa aceitar conexões vindas da rede "
+        f"Docker. '{CONTAINER}': cria um {label} novo, com volume vazio — os dados atuais "
+        "não são copiados.",
     )
 
 
@@ -158,6 +190,20 @@ def apply_answer(analysis: ProjectAnalysis, question: Question, answer: str) -> 
             raise AnswerError("Responda 'sim' ou 'nao'.")
         service.decision = ServiceDecision.LOCAL if answer == YES else ServiceDecision.DISCARDED
         service.reason = "Decisão confirmada pelo usuário."
+    elif kind == "host":
+        service = analysis.service(ServiceKind(rest))
+        if service is None:
+            raise AnswerError(f"Serviço não encontrado: {rest}")
+        if answer not in (HOST, CONTAINER):
+            raise AnswerError(f"Responda '{HOST}' ou '{CONTAINER}'.")
+        label = SPECS[service.kind].label
+        if answer == HOST:
+            service.decision = ServiceDecision.HOST
+            service.reason = f"{label} existente no host, acessado via host.docker.internal."
+        else:
+            service.decision = ServiceDecision.LOCAL
+            service.reason = f"Novo container {label} confirmado pelo usuário."
+        service.host_candidate = False
     elif kind == "broker":
         if answer not in ("redis", "rabbitmq", "externo"):
             raise AnswerError("Escolha redis, rabbitmq ou externo.")

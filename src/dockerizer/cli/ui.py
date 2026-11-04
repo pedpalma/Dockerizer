@@ -6,6 +6,7 @@ import shlex
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -35,16 +36,18 @@ def info(message: str) -> None:
     console.print(message)
 
 
+# As mensagens trazem texto do projeto analisado (caminhos, "[program:x]", "[Service]"...):
+# escapá-las impede que o Rich as interprete como marcação e omita trechos.
 def success(message: str) -> None:
-    console.print(f"[green]✔[/green] {message}")
+    console.print(f"[green]✔[/green] {escape(message)}")
 
 
 def warn(message: str) -> None:
-    console.print(f"[yellow]![/yellow] {message}")
+    console.print(f"[yellow]![/yellow] {escape(message)}")
 
 
 def error(message: str) -> None:
-    console.print(f"[bold red]✖[/bold red] {message}")
+    console.print(f"[bold red]✖[/bold red] {escape(message)}")
 
 
 def show_command(args: list[str], simulated: bool) -> None:
@@ -80,11 +83,18 @@ def show_analysis(analysis: ProjectAnalysis) -> None:
         for app in analysis.applications:
             processes = []
             for process in app.processes:
-                command = process.command.display() if process.command else "[red]pendente[/red]"
+                command = (
+                    escape(process.command.display()) if process.command else "[red]pendente[/red]"
+                )
                 port = f" :{process.port}" if process.port else ""
-                processes.append(f"[bold]{process.name}[/bold]{port} → {command}")
+                processes.append(f"[bold]{escape(process.name)}[/bold]{port} → {command}")
             if app.migration:
-                processes.append(f"[bold]migrações[/bold] → {' '.join(app.migration.command)}")
+                migration = escape(" ".join(app.migration.command))
+                processes.append(f"[bold]migrações[/bold] → {migration}")
+            for data_dir in app.data_dirs:
+                processes.append(
+                    f"[bold]dados[/bold] {escape(data_dir.path)} → volume {data_dir.volume}"
+                )
             table.add_row(
                 app.name,
                 app.path,
@@ -106,6 +116,28 @@ def show_analysis(analysis: ProjectAnalysis) -> None:
                 ", ".join(service.used_by) or "—",
             )
         console.print(table)
+    if analysis.reverse_proxies:
+        table = Table(title="Proxy reverso existente (nginx) — não reproduzido", show_lines=True)
+        for column in ("Arquivo", "Servidor", "Rota", "Destino", "Aplicação"):
+            table.add_column(column)
+        for proxy in analysis.reverse_proxies:
+            server = escape(", ".join(proxy.server_names) or "—")
+            if proxy.tls:
+                server += " [yellow](TLS)[/yellow]"
+            if proxy.settings:
+                server += "\n[dim]" + escape("\n".join(proxy.settings)) + "[/dim]"
+            routes = proxy.routes or []
+            if not routes:
+                table.add_row(proxy.path, server, "—", ", ".join(proxy.listens), "—")
+            for index, route in enumerate(routes):
+                table.add_row(
+                    escape(proxy.path) if index == 0 else "",
+                    server if index == 0 else "",
+                    escape(route.location),
+                    escape(route.target),
+                    route.app or "—",
+                )
+        console.print(table)
     if analysis.env_vars:
         names = [f"{v.name}{' (sensível)' if v.sensitive else ''}" for v in analysis.env_vars]
         console.print(f"[bold]Variáveis de ambiente:[/bold] {', '.join(names)}")
@@ -121,20 +153,36 @@ def show_analysis(analysis: ProjectAnalysis) -> None:
     for warning in analysis.warnings:
         warn(warning)
     for note in analysis.notes:
-        console.print(f"[dim]• {note}[/dim]")
+        console.print(f"[dim]• {escape(note)}[/dim]")
     if analysis.questions:
         warn(f"{len(analysis.questions)} item(ns) precisam de confirmação antes da geração.")
 
 
-def resolve_questions(analysis: ProjectAnalysis, assume_yes: bool) -> list[Question]:
-    """Pergunta ao usuário o que não foi identificado. Retorna perguntas não resolvidas."""
+def resolve_questions(
+    analysis: ProjectAnalysis, assume_yes: bool, answers: dict[str, str] | None = None
+) -> list[Question]:
+    """Pergunta ao usuário o que não foi identificado. Retorna perguntas não resolvidas.
+
+    ``answers`` traz respostas dadas em execuções anteriores (reaplicadas sem perguntar) e
+    recebe as novas respostas do usuário, para que um ``setup --yes`` posterior as reutilize.
+    """
     unresolved: list[Question] = []
+    answers = answers if answers is not None else {}
     for question in list(analysis.questions):
+        previous = answers.get(question.id)
+        if previous is not None:
+            try:
+                apply_answer(analysis, question, previous)
+                reused = escape(f"{question.prompt} → {previous}")
+                info(f"[dim]Resposta registrada reutilizada: {reused}[/dim]")
+                continue
+            except AnswerError:
+                answers.pop(question.id, None)
         console.print(
             Panel(
-                f"[bold]{question.prompt}[/bold]\n[dim]{question.help}[/dim]"
+                f"[bold]{escape(question.prompt)}[/bold]\n[dim]{escape(question.help)}[/dim]"
                 if question.help
-                else f"[bold]{question.prompt}[/bold]",
+                else f"[bold]{escape(question.prompt)}[/bold]",
                 title="Confirmação necessária",
                 border_style="yellow",
             )
@@ -170,6 +218,7 @@ def resolve_questions(analysis: ProjectAnalysis, assume_yes: bool) -> list[Quest
                     answer = question.choices[index]
             try:
                 apply_answer(analysis, question, answer)
+                answers[question.id] = answer
                 break
             except AnswerError as exc:
                 error(str(exc))

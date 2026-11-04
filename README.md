@@ -131,7 +131,8 @@ com `--path`. Sem nenhum dos dois, o diretório atual é usado.
 | `.dockerignore` | Exclui `.env`, `.git`, dependências e caches do contexto de build | Preservado (com aviso se não excluir `.env`) |
 | `.env.example` | Variáveis identificadas, **sem segredos** | Preservado |
 | `.env` | Credenciais geradas localmente (permissão `600`) | Recebe **apenas** variáveis de infraestrutura ausentes; nada é sobrescrito |
-| `.gitignore` | Acrescenta `.env` e `.dockerizer/` | Complementado (com backup) |
+| `.env.docker` | Só com serviços **do host**: as variáveis do `.env` com `localhost` trocado por `host.docker.internal` (permissão `600`) | Conflito: exige `--force` (com backup) |
+| `.gitignore` | Acrescenta `.env`, `.dockerizer/` (e `.env.docker`, quando gerado) | Complementado (com backup) |
 
 Decisões de segurança do Compose gerado:
 
@@ -155,6 +156,39 @@ As evidências são classificadas:
 URLs que apontam para `localhost` ou nomes de serviço indicam infraestrutura local; hosts
 externos (ex.: `*.rds.amazonaws.com`) indicam serviço externo, e nenhum container é criado.
 Sem evidência conclusiva (ou com evidências conflitantes), o Dockerizer pergunta.
+
+**Banco ou cache que já rodam na máquina.** Quando só o `.env` real aponta para
+`localhost`/`127.0.0.1` (sem Compose existente), "local" é ambíguo: pode ser o PostgreSQL
+instalado no servidor, com os dados reais. O Dockerizer pergunta, sem resposta padrão:
+
+- `host`: nenhum container é criado; os containers acessam o serviço via
+  `host.docker.internal` (`extra_hosts: host-gateway`), com as variáveis ajustadas em
+  `.env.docker`. O `.env` original não muda, e os processos fora do Docker continuam
+  funcionando. O serviço precisa aceitar conexões da rede Docker (PostgreSQL:
+  `listen_addresses` e `pg_hba.conf`; Redis: `bind`/`protected-mode`). Migrações não rodam
+  automaticamente.
+- `container`: cria um serviço novo, com volume **vazio** (os dados atuais não são copiados).
+
+As respostas ficam em `.dockerizer/manifest.json` e são reaproveitadas pelos próximos
+`setup` (inclusive com `--yes`).
+
+### Projetos que já rodam fora do Docker
+
+- **Comandos de produção**: units do systemd (`*.service`, `ExecStart=`), programas do
+  supervisor (`[program:x]`) e o `ecosystem.config.js`/`ecosystem.json` do pm2 são lidos (nunca
+  executados) e têm a mesma precedência do `Procfile`, que prevalece sobre eles. Os comandos
+  são adaptados ao container: binários do virtualenv viram o nome do programa, `127.0.0.1`
+  vira `0.0.0.0`, sockets Unix viram TCP, e `--daemon`, `--pid`, `--user` e arquivos de log
+  são removidos. Processos que não são Celery (pollers, consumidores) viram serviços próprios.
+- **Diretórios de dados**: variáveis como `STORAGE_PATH`, `MEDIA_ROOT`, `UPLOAD_DIR` e
+  `UPLOAD_FOLDER` ganham um volume nomeado em todos os processos da aplicação, e o
+  Dockerfile cria o diretório com o dono certo. O valor vem do `.env`, do `.env.example` ou
+  do padrão literal no código (`BaseSettings`, `os.getenv(..., "padrão")`, `MEDIA_ROOT` do
+  Django). Arquivos que já existem no host não são copiados para o volume.
+- **nginx**: configurações do projeto são lidas e listadas (rotas, `proxy_pass` com a
+  aplicação correspondente, TLS, `client_max_body_size` e outros ajustes), mas **não são
+  reproduzidas**. Quando a porta publicada muda (ex.: 8000 ocupada → 8002), o Dockerizer
+  indica qual `proxy_pass` ajustar.
 
 ## Processo de reversão
 
@@ -241,6 +275,11 @@ interna bloqueia `docker compose down -v` e remoção de volumes fora do comando
 - URLs de conexão montadas pelo Compose assumem senhas sem caracteres especiais de URL (as
   geradas pelo Dockerizer já seguem essa regra).
 - Projetos muito grandes são analisados até 20.000 arquivos e 8 níveis de diretório.
+- nginx, Caddy e outros proxies não são gerados no Compose; TLS e domínios continuam no
+  proxy do host. Arquivos de `/etc` fora do projeto não são lidos.
+- systemd: especificadores (`%i`, `%h`) e units `Type=oneshot` são ignorados; supervisor:
+  expansões `%(...)s` são ignoradas; pm2 em modo cluster vira um processo por serviço.
+- Dados de diretórios do host e de bancos do host não são migrados para volumes.
 - Algumas mensagens internas raras do Typer podem aparecer em inglês.
 
 ## Estrutura do código
@@ -249,7 +288,8 @@ interna bloqueia `docker compose down -v` e remoção de volumes fora do comando
 src/dockerizer/
 ├── cli/            # comandos (Typer), apresentação (Rich), tradução da ajuda
 ├── scanner/        # descoberta de arquivos e raízes de aplicações
-├── analyzers/      # Python, Node.js, infraestrutura, variáveis, perguntas
+├── analyzers/      # Python, Node.js, infraestrutura, variáveis, perguntas, systemd/
+│                   # supervisor/pm2, nginx e diretórios de dados
 ├── models/         # modelo de domínio (Pydantic)
 ├── generators/     # Dockerfile, Compose, .env, plano de geração
 ├── templates/      # templates Jinja2

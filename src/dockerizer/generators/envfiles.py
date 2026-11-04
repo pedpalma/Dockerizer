@@ -14,11 +14,12 @@ import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from dockerizer.analyzers.env import parse_env_file
-from dockerizer.analyzers.infrastructure import SPECS
-from dockerizer.generators.compose import INFRA_VARS
+from dockerizer.analyzers.env import find_urls, is_host_machine, parse_env_file
+from dockerizer.analyzers.infrastructure import SPECS, env_kind_hint
+from dockerizer.constants import HOST_ENV_FILE
+from dockerizer.generators.compose import HOST_GATEWAY, INFRA_VARS
 from dockerizer.generators.templating import render
-from dockerizer.models.architecture import EnvVar, ProjectAnalysis
+from dockerizer.models.architecture import EnvVar, ProjectAnalysis, ServiceKind
 
 GENERATABLE_SECRET_RE = re.compile(r"(^|_)(SECRET_KEY|SECRET|SIGNING_KEY|JWT_SECRET|APP_KEY)$")
 APPEND_HEADER = "# --- Adicionado pelo Dockerizer (infraestrutura local) ---"
@@ -150,3 +151,74 @@ def append_to_env(existing: str, analysis: ProjectAnalysis, infra_values: dict[s
     separator = "" if existing.endswith("\n") or not existing else "\n"
     prefix = existing + separator + ("\n" if existing else "")
     return prefix + "\n".join(block) + "\n"
+
+
+HOST_URL_RE = re.compile(
+    # userinfo guloso até o último "@" (senhas com "@" sem codificação ainda funcionam)
+    r"(?P<prefix>://(?:[^/\s]*@)?)(?:localhost|127\.0\.0\.1|\[::1\])(?=[:/?#]|$)",
+    re.IGNORECASE,
+)
+SAFE_ENV_VALUE_RE = re.compile(r"[A-Za-z0-9_./:@%+=,?&-]*")
+
+
+def _host_value(name: str, value: str, kinds: set[ServiceKind]) -> str:
+    """O mesmo valor, apontando os serviços do host para ``host.docker.internal``."""
+    urls = [u for u in find_urls(value) if u.service and ServiceKind(u.service) in kinds]
+    if any(is_host_machine(u.host) for u in urls):
+        return HOST_URL_RE.sub(rf"\g<prefix>{HOST_GATEWAY}", value)
+    if name.endswith("_HOST") and is_host_machine(value) and env_kind_hint(name, kinds):
+        return HOST_GATEWAY
+    return value
+
+
+def _env_line(name: str, value: str) -> str | None:
+    if SAFE_ENV_VALUE_RE.fullmatch(value):
+        return f"{name}={value}"
+    if "'" not in value:
+        return f"{name}='{value}'"  # aspas simples: o Compose não interpola o valor
+    return None
+
+
+def render_host_env(
+    analysis: ProjectAnalysis, env_texts: dict[str, str]
+) -> tuple[str | None, list[str]]:
+    """Conteúdo de ``.env.docker`` para serviços que rodam no host (``None`` se não há).
+
+    ``env_texts`` são os arquivos .env reais que o Compose carrega, em ordem de precedência.
+    O ``.env`` original não é alterado: os processos que rodam fora do Docker continuam
+    usando ``localhost``.
+    """
+    kinds = {s.kind for s in analysis.host_services()}
+    if not kinds:
+        return None, []
+    warnings: list[str] = []
+    rewritten: dict[str, str] = {}
+    for text in env_texts.values():
+        for name, value in parse_env_file(text).items():
+            new = _host_value(name, value, kinds)
+            if new != value:
+                rewritten[name] = new
+    lines = []
+    for name, value in rewritten.items():
+        line = _env_line(name, value)
+        if line is None:
+            warnings.append(
+                f"{name} contém aspas simples e não foi copiada para {HOST_ENV_FILE}; "
+                f"defina-a manualmente com o host {HOST_GATEWAY}."
+            )
+            continue
+        lines.append(line)
+    if not lines:
+        labels = ", ".join(SPECS[k].label for k in sorted(kinds))
+        warnings.append(
+            f"Nenhuma variável com localhost para {labels} foi encontrada no .env; configure o "
+            f"host {HOST_GATEWAY} manualmente."
+        )
+        return None, warnings
+    header = [
+        "# Gerado pelo Dockerizer a partir do .env: as mesmas variáveis com localhost trocado por",
+        f"# {HOST_GATEWAY}, para que os containers alcancem os serviços desta máquina.",
+        "# Carregado pelo compose.yaml depois do .env. Rode 'dockerizer setup' de novo se o .env",
+        "# mudar. Contém segredos: NÃO versione este arquivo.",
+    ]
+    return "\n".join([*header, *lines]) + "\n", warnings

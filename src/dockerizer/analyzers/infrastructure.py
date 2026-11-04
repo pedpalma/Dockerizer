@@ -19,7 +19,7 @@ from typing import Any
 
 import yaml
 
-from dockerizer.analyzers.env import find_urls, parse_env_file
+from dockerizer.analyzers.env import find_urls, is_host_machine, parse_env_file
 from dockerizer.models.architecture import (
     Application,
     Evidence,
@@ -105,7 +105,7 @@ DJANGO_HOST_RE = re.compile(r"[\"']HOST[\"']\s*:\s*[\"']([^\"']+)[\"']")
 DB_URL_VARS = ("DATABASE_URL", "DB_URL", "SQLALCHEMY_DATABASE_URI", "DATABASE_URI")
 
 
-def _env_kind_hint(name: str, kinds_with_deps: set[ServiceKind]) -> list[ServiceKind]:
+def env_kind_hint(name: str, kinds_with_deps: set[ServiceKind]) -> list[ServiceKind]:
     found = [s.kind for s in SPECS.values() if name.startswith(s.env_hints)]
     if not found and (name in DB_URL_VARS or name.startswith(("DB_", "DATABASE_"))):
         found = [k for k in (ServiceKind.POSTGRES, ServiceKind.MYSQL) if k in kinds_with_deps]
@@ -154,6 +154,21 @@ class InfrastructureAnalyzer:
             if not evidence:
                 continue
             decision, reason = self._decide(evidence)
+            strong_local = [
+                e
+                for e in evidence
+                if e.strength is EvidenceStrength.STRONG and e.points_to is ServiceDecision.LOCAL
+            ]
+            host_candidate = (
+                decision is ServiceDecision.LOCAL
+                and bool(strong_local)
+                and all(e.host_machine for e in strong_local)
+            )
+            if host_candidate:
+                reason = (
+                    "O .env aponta para esta máquina (localhost): pode ser um serviço já "
+                    "instalado no host ou um container a criar."
+                )
             services.append(
                 InfraService(
                     kind=kind,
@@ -163,6 +178,7 @@ class InfrastructureAnalyzer:
                     image=self.images.get(kind, spec.image),
                     reason=reason,
                     url_scheme=self.schemes.get(kind),
+                    host_candidate=host_candidate,
                 )
             )
         return services
@@ -205,6 +221,7 @@ class InfrastructureAnalyzer:
                     strength=strength,
                     points_to=target,
                     app=app,
+                    host_machine=is_host_machine(url.host),
                 ),
             )
             if local and kind not in self.schemes:
@@ -219,6 +236,31 @@ class InfrastructureAnalyzer:
             values = parse_env_file(self.files.read(rel))
             text = "\n".join(values.values())
             self._url_evidence(text, rel, strength, self._app_for(rel))
+            self._host_vars(values, rel, strength, self._app_for(rel))
+
+    def _host_vars(
+        self, values: dict[str, str], source: str, strength: EvidenceStrength, app: str | None
+    ) -> None:
+        """``DB_HOST=localhost`` e afins: o host também decide, mesmo sem URL completa."""
+        kinds_with_deps = {k for k, ev in self.evidence.items() if ev}
+        for name, value in values.items():
+            host = value.strip()
+            if not name.endswith("_HOST") or not host or any(c in host for c in "${}"):
+                continue
+            for kind in env_kind_hint(name, kinds_with_deps):
+                machine = is_host_machine(host)
+                local = machine or "." not in host or host == "host.docker.internal"
+                self._add(
+                    kind,
+                    Evidence(
+                        description=f"{name}={host} ({'local' if local else 'externo'})",
+                        source=source,
+                        strength=strength,
+                        points_to=ServiceDecision.LOCAL if local else ServiceDecision.EXTERNAL,
+                        app=app,
+                        host_machine=machine,
+                    ),
+                )
 
     def _code_and_config(self) -> None:
         for app in self.apps:
@@ -293,7 +335,7 @@ class InfrastructureAnalyzer:
         kinds_with_deps = {k for k, ev in self.evidence.items() if ev}
         for app in self.apps:
             for name in app.env_vars:
-                for kind in _env_kind_hint(name, kinds_with_deps):
+                for kind in env_kind_hint(name, kinds_with_deps):
                     self._add(
                         kind,
                         Evidence(

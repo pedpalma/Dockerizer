@@ -29,6 +29,13 @@ from dockerizer.models.architecture import (
 
 APP_NETWORK = "app"
 DATA_NETWORK = "data"
+HOST_GATEWAY = "host.docker.internal"
+HOST_ACCESS_HINTS = {
+    ServiceKind.POSTGRES: "listen_addresses no postgresql.conf e uma regra no pg_hba.conf",
+    ServiceKind.MYSQL: "bind-address no my.cnf e um usuário com permissão para o host",
+    ServiceKind.REDIS: "bind e protected-mode no redis.conf",
+    ServiceKind.RABBITMQ: "um usuário diferente de guest (guest só aceita localhost)",
+}
 
 
 class _NoAliasDumper(yaml.SafeDumper):
@@ -324,6 +331,14 @@ def build_compose(
             volumes.append(volume)
 
     db_kinds = {ServiceKind.POSTGRES, ServiceKind.MYSQL}
+    host_services = analysis.host_services()
+    for service in host_services:
+        spec = SPECS[service.kind]
+        warnings.append(
+            f"{spec.label} do host: os containers o acessam em {HOST_GATEWAY} (mesma porta do "
+            ".env) e nenhum container ou volume é criado para ele. O serviço precisa aceitar conexões "
+            f"da rede Docker ({HOST_ACCESS_HINTS[service.kind]})."
+        )
     for app in analysis.applications:
         image = image_name(project, app)
         images.append(image)
@@ -333,6 +348,16 @@ def build_compose(
         overrides[app.name] = env
         used = [s for s in local if app.name in s.used_by]
         needs_data = bool(used)
+        uses_host = any(app.name in s.used_by for s in host_services)
+        data_mounts = [f"{d.volume}:{d.path}" for d in app.data_dirs]
+        for data_dir in app.data_dirs:
+            volumes.append(data_dir.volume)
+        if app.data_dirs and app.existing_dockerfile:
+            warnings.append(
+                f"Dockerfile existente de '{app.name}': garanta que "
+                f"{', '.join(d.path for d in app.data_dirs)} exista(m) na imagem com dono igual "
+                "ao usuário da aplicação; senão o volume é montado como root e a escrita falha."
+            )
         build: dict[str, Any] = {"context": app.path, "dockerfile": "Dockerfile"}
         if app.build_args and mode is Mode.PRODUCTION:
             build["args"] = {arg: f"${{{arg}:-}}" for arg in app.build_args}
@@ -342,20 +367,22 @@ def build_compose(
         if app.migration and any(s.kind in db_kinds for s in used):
             migrate_name = migrate_service_name(app)
             services[migrate_name] = _base_app_service(
-                image, build, env_files, env, depends, needs_data, mode, app
+                image, build, env_files, env, depends, needs_data, mode, app, uses_host
             ) | {"command": app.migration.command, "restart": "no"}
         elif app.migration:
             warnings.append(
                 f"Migrações de '{app.name}' ({app.migration.tool}) detectadas, mas o banco não é "
-                "local: elas não serão executadas automaticamente. Execute-as manualmente: "
-                + " ".join(app.migration.command)
+                "um container criado pelo Dockerizer: elas não serão executadas automaticamente. "
+                "Execute-as manualmente: " + " ".join(app.migration.command)
             )
         main = main_process(app)
         for process in app.processes:
             name = names[process.name]
             definition = _base_app_service(
-                image, build, env_files, env, depends, needs_data, mode, app
+                image, build, env_files, env, depends, needs_data, mode, app, uses_host
             )
+            if data_mounts:
+                definition["volumes"] = [*definition.get("volumes", []), *data_mounts]
             if migrate_name and process is main:
                 definition["depends_on"] = {
                     **depends,
@@ -413,6 +440,7 @@ def _base_app_service(
     needs_data: bool,
     mode: Mode,
     app: Application,
+    uses_host: bool = False,
 ) -> dict[str, Any]:
     definition: dict[str, Any] = {"build": dict(build), "image": image}
     if env_files:
@@ -427,6 +455,9 @@ def _base_app_service(
             volumes.append("/app/node_modules")
         definition["volumes"] = volumes
     definition["networks"] = [APP_NETWORK, DATA_NETWORK] if needs_data else [APP_NETWORK]
+    if uses_host:
+        # Necessário no Linux; no Docker Desktop o nome já existe.
+        definition["extra_hosts"] = [f"{HOST_GATEWAY}:host-gateway"]
     definition["restart"] = "unless-stopped"
     definition["init"] = True
     definition["security_opt"] = ["no-new-privileges:true"]
