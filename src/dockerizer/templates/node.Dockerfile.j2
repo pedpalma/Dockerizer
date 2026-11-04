@@ -1,0 +1,93 @@
+# syntax=docker/dockerfile:1
+# Gerado pelo Dockerizer — aplicação "{{ app.name }}" ({{ app.path }}), modo {{ mode_label }}.
+# Edições manuais são detectadas pelo Dockerizer e preservadas (veja "dockerizer rollback").
+{% if dev %}
+FROM node:{{ app.language_version }}-alpine
+
+ENV NODE_ENV=development \
+    COREPACK_ENABLE_DOWNLOAD_PROMPT=0{% if port %} \
+    PORT={{ port }}{% endif %}
+
+WORKDIR /app
+{% if corepack %}
+RUN corepack enable
+{% endif %}
+RUN chown node:node /app
+USER node
+
+COPY --chown=node:node {{ install_files | join(" ") }} ./
+RUN {{ install_command }}
+
+COPY --chown=node:node . .
+{% if port %}
+
+EXPOSE {{ port }}
+{% endif %}
+
+CMD {{ command | exec_form }}
+{% else %}
+# Estágio 1: dependências (camada reaproveitada enquanto o lockfile não mudar).
+FROM node:{{ app.language_version }}-alpine AS deps
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+WORKDIR /app
+{% if corepack %}
+RUN corepack enable
+{% endif %}
+COPY {{ install_files | join(" ") }} ./
+RUN --mount=type=cache,target={{ cache_dir }} \
+    {{ install_command }}
+
+# Estágio 2: build da aplicação.
+FROM deps AS build
+COPY . .
+{% for arg in app.build_args %}
+ARG {{ arg }}
+ENV {{ arg }}=${{ '{' }}{{ arg }}{{ '}' }}
+{% endfor %}
+ENV NODE_ENV=production
+{% if build_command %}
+RUN {{ build_command | shell_join }}
+{% endif %}
+{% if static %}
+
+# Estágio 3: arquivos estáticos servidos por nginx sem privilégios.
+FROM {{ nginx_image }}
+USER root
+RUN printf '%s\n' \
+    'server {' \
+    '    listen {{ port }};' \
+    '    server_name _;' \
+    '    root /usr/share/nginx/html;' \
+    '    index index.html;' \
+    '    location / {' \
+    '        try_files $uri $uri/ /index.html;' \
+    '    }' \
+    '}' > /etc/nginx/conf.d/default.conf
+COPY --from=build /app/{{ app.static_output_dir }} /usr/share/nginx/html
+USER 101
+
+EXPOSE {{ port }}
+
+CMD ["nginx", "-g", "daemon off;"]
+{% else %}
+{% if prune_command %}
+RUN {{ prune_command }}
+{% endif %}
+
+# Estágio 3: imagem final apenas com o necessário para executar.
+FROM node:{{ app.language_version }}-alpine AS runtime
+ENV NODE_ENV=production{% if port %} \
+    PORT={{ port }} \
+    HOSTNAME=0.0.0.0{% endif %}
+
+WORKDIR /app
+COPY --from=build --chown=node:node /app ./
+USER node
+{% if port %}
+
+EXPOSE {{ port }}
+{% endif %}
+
+CMD {{ command | exec_form }}
+{% endif %}
+{% endif %}
