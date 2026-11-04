@@ -294,7 +294,7 @@ def show_validation(result: ValidationResult) -> None:
         success(f"Validação concluída sem problemas{detail}.")
         return
     for issue in result.issues:
-        where = f" [dim]({issue.file})[/dim]" if issue.file else ""
+        where = f" ({issue.file})" if issue.file else ""  # error/warn escapam o markup
         if issue.level is Level.ERROR:
             error(f"{issue.message}{where}")
         else:

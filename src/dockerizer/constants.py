@@ -26,6 +26,9 @@ def compose_project_name(project_name: str) -> str:
 
 COMPOSE_PROJECT_LABEL: Final = "com.docker.compose.project"
 COMPOSE_VOLUME_LABEL: Final = "com.docker.compose.volume"
+# O compose.yaml gerado usa "env_file" com "required: false" (Docker Compose 2.24.0+).
+# Versões anteriores rejeitam o arquivo com um erro de schema pouco claro.
+MIN_COMPOSE_VERSION: Final = (2, 24, 0)
 
 DEFAULT_PYTHON_VERSION: Final = "3.12"
 DEFAULT_NODE_VERSION: Final = "22"

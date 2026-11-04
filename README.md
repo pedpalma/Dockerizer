@@ -14,6 +14,9 @@ externo — o Dockerizer **pergunta** em vez de inventar.
 - Python 3.12 ou superior.
 - Docker Engine com BuildKit (padrão desde o Docker 23).
 - Docker Compose v2.24 ou superior (necessário para `env_file` com `required: false`).
+  O Dockerizer confere a versão: `setup`, `up`, `down`, `logs`, `status` e `validate`
+  param com uma mensagem clara em versões anteriores. `rollback` e `purge` continuam
+  funcionando, para que containers e dados nunca dependam de uma atualização.
 
 O Docker só é necessário para `--build`, `--start`, `up`, `down`, `logs`, `status`,
 `rollback` (remoção de containers) e `purge`. A análise, a geração e a validação estática

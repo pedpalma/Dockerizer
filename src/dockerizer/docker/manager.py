@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
@@ -17,10 +18,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from dockerizer.constants import COMPOSE_FILE, COMPOSE_PROJECT_LABEL, MANAGED_LABEL
+from dockerizer.constants import (
+    COMPOSE_FILE,
+    COMPOSE_PROJECT_LABEL,
+    MANAGED_LABEL,
+    MIN_COMPOSE_VERSION,
+)
 
 DEFAULT_TIMEOUT = 30.0
 LONG_TIMEOUT: float | None = None  # build/up podem demorar; interrompíveis com Ctrl+C
+# "Docker Compose version v2.29.7", "2.29.7-desktop.1", "v2.24.0"...
+VERSION_RE = re.compile(r"\bv?(\d+)\.(\d+)(?:\.(\d+))?")
+
+Version = tuple[int, int, int]
 
 
 @dataclass
@@ -125,6 +135,11 @@ class DockerManager:
             return False
         return self._run(["docker", "compose", "version"], mutating=False).ok
 
+    def compose_version(self) -> Version | None:
+        """Versão do plugin Compose (``None`` se indisponível ou não reconhecida)."""
+        result = self._run(["docker", "compose", "version"], mutating=False)
+        return parse_version(result.stdout) if result.ok else None
+
     def daemon_running(self) -> bool:
         result = self._run(["docker", "info", "--format", "{{.ServerVersion}}"], mutating=False)
         return result.ok
@@ -216,6 +231,30 @@ class DockerCommandError(Exception):
         self.result = result
         detail = (result.stderr or result.stdout).strip()
         super().__init__(f"Falha ao executar {' '.join(result.args[:4])}...: {detail}")
+
+
+def parse_version(text: str) -> Version | None:
+    match = VERSION_RE.search(text)
+    if not match:
+        return None
+    major, minor, patch = match.groups()
+    return int(major), int(minor), int(patch or 0)
+
+
+def format_version(version: Version) -> str:
+    return ".".join(str(part) for part in version)
+
+
+def compose_version_error(version: Version | None) -> str | None:
+    """Mensagem de erro se o Compose for antigo demais para o compose.yaml gerado."""
+    if version is None or version >= MIN_COMPOSE_VERSION:
+        return None
+    return (
+        f"Docker Compose {format_version(version)} encontrado; o Dockerizer exige "
+        f"{format_version(MIN_COMPOSE_VERSION)} ou mais recente (o compose.yaml gerado usa "
+        "'env_file' com 'required: false'). Atualize o Docker ou o pacote "
+        "docker-compose-plugin."
+    )
 
 
 def parse_json_lines(text: str) -> list[dict[str, Any]]:
