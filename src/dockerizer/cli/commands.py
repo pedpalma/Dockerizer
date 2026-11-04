@@ -11,7 +11,7 @@ import typer
 from dockerizer import __version__
 from dockerizer.analyzers.project import analyze_project
 from dockerizer.cli import i18n, ui
-from dockerizer.constants import COMPOSE_FILE, TOOL_DIR
+from dockerizer.constants import COMPOSE_FILE, TOOL_DIR, compose_project_name
 from dockerizer.docker.manager import (
     DockerCommandError,
     DockerManager,
@@ -124,7 +124,7 @@ def docker_for(
     resources = manifest.docker if manifest else None
     return DockerManager(
         root,
-        resources.compose_project if resources else project,
+        resources.compose_project if resources else compose_project_name(project),
         resources.compose_file if resources else COMPOSE_FILE,
         runner=DOCKER_RUNNER,
         dry_run=dry_run,
@@ -229,7 +229,13 @@ def setup(
     conflicts = [c for c in changes if c.action is ChangeAction.CONFLICT]
 
     if dry_run:
-        ui.show_validation(static)
+        if conflicts:
+            ui.warn(
+                f"{len(conflicts)} conflito(s) impediriam a geração; a validação foi omitida "
+                "porque o resultado ficaria incompleto. Revise os arquivos ou use --force."
+            )
+        else:
+            ui.show_validation(static)
         manager = docker_for(root, None, analysis.project_name, dry_run=True)
         if build:
             manager.build()
@@ -265,7 +271,7 @@ def setup(
     manifest.mode = mode.value
     started = manifest.docker.started if manifest.docker else False
     manifest.docker = DockerResources(
-        compose_project=analysis.project_name,
+        compose_project=compose_project_name(analysis.project_name),
         compose_file=COMPOSE_FILE,
         services=plan.compose.services,
         images=plan.compose.images,
@@ -536,7 +542,11 @@ def purge(path: PathArg = None, path_opt: PathOpt = None, dry_run: DryRun = Fals
         docker.remove_volumes(plan.volumes)
         ui.info("[bold]Dry-run:[/bold] nenhum volume removido.")
         return
-    project = manifest.docker.compose_project if manifest.docker else manifest.project_name
+    project = (
+        manifest.docker.compose_project
+        if manifest.docker
+        else compose_project_name(manifest.project_name)
+    )
     try:
         typed = typer.prompt(f"Para confirmar, digite o nome do projeto ({project})")
     except typer.Abort:

@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from dockerizer.constants import COMPOSE_FILE, COMPOSE_PROJECT_LABEL
+from dockerizer.constants import COMPOSE_FILE, COMPOSE_PROJECT_LABEL, MANAGED_LABEL
 
 DEFAULT_TIMEOUT = 30.0
 LONG_TIMEOUT: float | None = None  # build/up podem demorar; interrompíveis com Ctrl+C
@@ -168,7 +168,13 @@ class DockerManager:
 
     # -- recursos por label (independem do compose.yaml existir) ---------------------------
     def _label_filter(self) -> list[str]:
-        return ["--filter", f"label={COMPOSE_PROJECT_LABEL}={self.project}"]
+        """Recursos do projeto *e* criados pelo Dockerizer (os filtros são combinados com E)."""
+        return [
+            "--filter",
+            f"label={COMPOSE_PROJECT_LABEL}={self.project}",
+            "--filter",
+            f"label={MANAGED_LABEL}=true",
+        ]
 
     def project_containers(self) -> list[str]:
         result = self._run(

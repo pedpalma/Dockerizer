@@ -70,6 +70,7 @@ def test_project_resources_are_filtered_by_label(tmp_path: Path) -> None:
     ids = DockerManager(tmp_path, "proj", runner=fake).project_containers()
     assert ids == ["abc", "def"]
     assert "label=com.docker.compose.project=proj" in fake.calls[0]
+    assert "label=com.dockerizer.managed=true" in fake.calls[0]  # nunca recursos de terceiros
 
 
 def test_parse_compose_ps_formats() -> None:

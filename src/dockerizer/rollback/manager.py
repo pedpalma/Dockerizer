@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
-from dockerizer.constants import COMPOSE_FILE
+from dockerizer.constants import COMPOSE_FILE, compose_project_name
 from dockerizer.docker.manager import DockerManager
 from dockerizer.fs.paths import PathSecurityError, atomic_write, ensure_writable_target, sha256_file
 from dockerizer.rollback.manifest import FileRecord, Manifest, ManifestStore, new_run_id
@@ -242,7 +242,11 @@ def plan_purge(manifest: Manifest, docker: DockerManager) -> PurgePlan:
     """Volumes do projeto registrado, restritos aos volumes declarados pelo Dockerizer."""
     managed = set(manifest.docker.volumes) if manifest.docker else set()
     existing = docker.project_volumes()
-    project = manifest.docker.compose_project if manifest.docker else manifest.project_name
+    project = (
+        manifest.docker.compose_project
+        if manifest.docker
+        else compose_project_name(manifest.project_name)
+    )
     volumes = [v for v in existing if v.removeprefix(f"{project}_") in managed]
     return PurgePlan(volumes=volumes, running_containers=docker.project_containers())
 

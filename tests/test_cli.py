@@ -208,10 +208,42 @@ def test_rollback_full_cycle_restores_project(
 def test_purge_requires_typed_confirmation(make_project: Factory, fake_docker: FakeDocker) -> None:
     root = make_project(FASTAPI_PROJECT)
     assert run("setup", str(root), "--yes")[0] == 0
-    fake_docker.outputs["volume ls"] = "projeto_postgres_data\n"
+    fake_docker.outputs["volume ls"] = "projeto-dockerizer_postgres_data\n"
     code, output = run("purge", str(root), input="errado\n")
     assert code == 1 and "incorreta" in output
     assert "volume rm" not in fake_docker.commands()
-    code, output = run("purge", str(root), input="projeto\n")
+    code, output = run("purge", str(root), input="projeto-dockerizer\n")
     assert code == 0, output
-    assert ["docker", "volume", "rm", "projeto_postgres_data"] in fake_docker.calls
+    assert ["docker", "volume", "rm", "projeto-dockerizer_postgres_data"] in fake_docker.calls
+
+
+def test_setup_does_not_shadow_existing_docker_compose_yml(
+    make_project: Factory, fake_docker: FakeDocker
+) -> None:
+    original = "services:\n  db:\n    image: postgres:16-alpine\n"
+    root = make_project({**FASTAPI_PROJECT, "docker-compose.yml": original})
+    before = tree_digest(root)
+    code, output = run("setup", str(root), "--yes")
+    assert code == 3 and "docker-compose.yml" in output and "prioriza" in output
+    assert tree_digest(root) == before and not (root / "compose.yaml").exists()
+    code, output = run("setup", str(root), "--yes", "--dry-run")
+    assert code == 3 and "validação foi omitida" in output and "não encontrado" not in output
+
+    code, output = run("setup", str(root), "--yes", "--force")
+    assert code == 0, output
+    assert (root / "compose.yaml").is_file()
+    assert (root / "docker-compose.yml").read_text() == original
+    assert run("rollback", str(root), "--yes")[0] == 0
+    assert tree_digest(root) == before
+
+
+def test_compose_project_never_reuses_directory_name(
+    make_project: Factory, fake_docker: FakeDocker
+) -> None:
+    root = make_project(FASTAPI_PROJECT)
+    assert run("setup", str(root), "--yes", "--build", "--start")[0] == 0
+    projects = {c[c.index("-p") + 1] for c in fake_docker.calls if "-p" in c}
+    assert projects == {"projeto-dockerizer"}
+    manifest = ManifestStore(root).load()
+    assert manifest is not None and manifest.docker is not None
+    assert manifest.docker.compose_project == "projeto-dockerizer"

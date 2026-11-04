@@ -53,6 +53,8 @@ class GeneratedFile:
     description: str
     mode: int | None = None
     sensitive: bool = False
+    # Arquivos preexistentes que deixariam de ser usados se este fosse criado.
+    shadows: tuple[str, ...] = ()
 
 
 @dataclass
@@ -94,6 +96,21 @@ def _plan_one(
                 generated,
                 ChangeAction.CONFLICT,
                 "Arquivo modificado pelo Dockerizer foi removido manualmente.",
+            )
+        if generated.shadows and record is None:
+            others = ", ".join(generated.shadows)
+            if force:
+                return PlannedChange(
+                    generated,
+                    ChangeAction.CREATE,
+                    f"Criado (--force); passa a ter prioridade sobre {others}, que não é "
+                    "alterado. O rollback remove este arquivo.",
+                )
+            return PlannedChange(
+                generated,
+                ChangeAction.CONFLICT,
+                f"{others} existente deixaria de ser usado pelo Docker Compose, que prioriza "
+                f"{generated.path}. Use --force para gerar mesmo assim ({others} não é alterado).",
             )
         return PlannedChange(generated, ChangeAction.CREATE, "Novo arquivo.")
     if not target.is_file():

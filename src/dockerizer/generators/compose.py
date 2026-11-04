@@ -13,7 +13,7 @@ from typing import Any
 import yaml
 
 from dockerizer.analyzers.infrastructure import SPECS
-from dockerizer.constants import MANAGED_LABEL
+from dockerizer.constants import MANAGED_LABEL, compose_project_name
 from dockerizer.generators.dockerfile import MODE_LABELS, main_process
 from dockerizer.generators.templating import render
 from dockerizer.models.architecture import (
@@ -308,7 +308,7 @@ def build_compose(
     host_ports: dict[str, int],
     app_env_files: dict[str, list[str]],
 ) -> ComposeResult:
-    project = analysis.project_name
+    project = compose_project_name(analysis.project_name)
     local = analysis.local_services()
     services: dict[str, Any] = {}
     volumes: list[str] = []
@@ -380,12 +380,13 @@ def build_compose(
                 definition["healthcheck"] = healthcheck
             services[name] = definition
 
-    networks: dict[str, Any] = {APP_NETWORK: {}}
+    labels = {MANAGED_LABEL: "true"}
+    networks: dict[str, Any] = {APP_NETWORK: {"labels": dict(labels)}}
     if local:
-        networks[DATA_NETWORK] = {"internal": True}
+        networks[DATA_NETWORK] = {"internal": True, "labels": dict(labels)}
     document: dict[str, Any] = {"name": project, "services": services, "networks": networks}
     if volumes:
-        document["volumes"] = {v: {} for v in volumes}
+        document["volumes"] = {v: {"labels": dict(labels)} for v in volumes}
     body = yaml.dump(
         document, Dumper=_NoAliasDumper, sort_keys=False, allow_unicode=True, width=100
     )
