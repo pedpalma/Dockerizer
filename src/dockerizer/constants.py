@@ -13,6 +13,15 @@ COMPOSE_FILE_NAMES: Final = frozenset(
 )
 
 MANAGED_LABEL: Final = "com.dockerizer.managed"
+# Sufixo do projeto Compose: projetos já dockerizados usam o nome do diretório como projeto,
+# e compartilhar esse nome faria o Compose tratar os containers deles como nossos.
+COMPOSE_PROJECT_SUFFIX: Final = "-dockerizer"
+
+
+def compose_project_name(project_name: str) -> str:
+    return f"{project_name}{COMPOSE_PROJECT_SUFFIX}"
+
+
 COMPOSE_PROJECT_LABEL: Final = "com.docker.compose.project"
 COMPOSE_VOLUME_LABEL: Final = "com.docker.compose.volume"
 

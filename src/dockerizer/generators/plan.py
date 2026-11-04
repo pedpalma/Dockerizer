@@ -11,7 +11,7 @@ from typing import Any
 import yaml
 
 from dockerizer.analyzers.env import parse_env_file
-from dockerizer.constants import COMPOSE_FILE, TOOL_DIR
+from dockerizer.constants import COMPOSE_FILE, COMPOSE_FILE_NAMES, TOOL_DIR
 from dockerizer.fs.changes import GeneratedFile, WritePolicy
 from dockerizer.fs.paths import read_text
 from dockerizer.generators.compose import ComposeResult, build_compose, service_names
@@ -226,6 +226,17 @@ def build_plan(
             content=compose.content,
             policy=WritePolicy.REPLACE,
             description="Serviços, redes, volumes e healthchecks",
+            shadows=tuple(
+                sorted(
+                    f.path
+                    for f in analysis.existing_docker_files
+                    if f.kind == "compose"
+                    and not f.managed
+                    and "/" not in f.path
+                    and f.path in COMPOSE_FILE_NAMES
+                    and f.path != COMPOSE_FILE
+                )
+            ),
         )
     )
     files.append(

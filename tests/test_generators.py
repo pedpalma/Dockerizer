@@ -168,8 +168,10 @@ def test_compose_services_networks_volumes(make_project: Factory) -> None:
     assert postgres["volumes"] == ["postgres_data:/var/lib/postgresql/data"]
     assert postgres["healthcheck"]["test"][0] == "CMD-SHELL"
     assert postgres["environment"]["POSTGRES_PASSWORD"].startswith("${POSTGRES_PASSWORD:?")
-    assert doc["networks"]["data"] == {"internal": True}
-    assert doc["volumes"] == {"postgres_data": {}}
+    managed = {"com.dockerizer.managed": "true"}
+    assert doc["name"] == "projeto-dockerizer"  # não colide com o compose do próprio projeto
+    assert doc["networks"]["data"] == {"internal": True, "labels": managed}
+    assert doc["volumes"] == {"postgres_data": {"labels": managed}}
 
     app = services["app"]
     assert app["ports"] == ["8000:8000"]

@@ -172,7 +172,8 @@ Toda alteração é registrada em `.dockerizer/`:
 
 1. Identifica as alterações registradas no manifesto.
 2. Remove os containers e redes do projeto Compose registrado (`docker compose down`, sem `-v`,
-   e remoção por label do que restar).
+   e remoção do que restar pelos labels do projeto **e** `com.dockerizer.managed=true` —
+   containers criados por outro compose nunca são removidos).
 3. Remove os arquivos criados pela ferramenta **se não foram editados depois**.
 4. Restaura os arquivos modificados a partir do backup (conferindo o hash do backup e as
    permissões originais).
@@ -198,7 +199,7 @@ interna bloqueia `docker compose down -v` e remoção de volumes fora do comando
 
   ```bash
   dockerizer down .
-  dockerizer purge .     # exige digitar o nome do projeto; --yes não se aplica
+  dockerizer purge .     # exige digitar o nome do projeto Compose; --yes não se aplica
   ```
 
   O `purge` só remove volumes do projeto Compose registrado e declarados pelo Dockerizer, e
@@ -213,6 +214,12 @@ interna bloqueia `docker compose down -v` e remoção de volumes fora do comando
 - Scripts do projeto (`start.sh`, `entrypoint.sh`, etc.) são apenas listados — **nunca
   executados** durante a análise.
 - Comandos externos são executados sem shell, como lista de argumentos e com timeout.
+- O projeto Compose gerado se chama `<diretório>-dockerizer` (ex.: `loja-dockerizer`), nunca o
+  nome do diretório: projetos já dockerizados usam esse nome por padrão, e compartilhá-lo faria
+  o Compose recriar ou remover (como órfãos) os containers do compose original.
+- Se a raiz já tem um `docker-compose.yml` (ou `compose.yml`), gerar `compose.yaml` é um
+  **conflito**, porque o Docker Compose passaria a priorizá-lo. Com `--force` o arquivo é
+  gerado e o original não é tocado; o `rollback` remove o `compose.yaml` gerado.
 - Relatórios mostram apenas nomes de variáveis; valores sensíveis nunca são exibidos.
 - `.npmrc` com tokens não é copiado para a imagem.
 
