@@ -20,8 +20,11 @@ NODE_ENV_PATTERNS = (
     re.compile(r"process\.env\[\s*[\"']([A-Za-z_][A-Za-z0-9_]*)[\"']\s*\]"),
     re.compile(r"import\.meta\.env\.([A-Za-z_][A-Za-z0-9_]*)"),
 )
-BASESETTINGS_RE = re.compile(r"^class\s+\w+\(\s*[\w.]*BaseSettings\s*\)\s*:", re.MULTILINE)
-FIELD_RE = re.compile(r"^(\s+)([A-Za-z_][A-Za-z0-9_]*)\s*:\s*[^=]")
+BASESETTINGS_RE = re.compile(r"^class\s+(\w+)\(\s*[\w.]*BaseSettings\s*\)\s*:", re.MULTILINE)
+FIELD_RE = re.compile(r"^(\s+)([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([^=\s][^=]*)")
+ALIAS_RE = re.compile(r"\b(?:validation_)?alias\s*=\s*[\"']([A-Za-z_][A-Za-z0-9_]*)[\"']")
+ENV_PREFIX_RE = re.compile(r"\benv_prefix\s*=\s*[\"']([A-Za-z0-9_]*)[\"']")
+ANNOTATION_NAMES_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 # Variáveis do sistema/runtime que não fazem sentido em .env.example.
 IGNORED_ENV = frozenset(
@@ -102,27 +105,72 @@ def python_env_refs(source: str) -> set[str]:
 
 
 def _basesettings_fields(source: str) -> set[str]:
+    """Campos de classes ``BaseSettings``, com o ``env_prefix`` aplicado.
+
+    Campos cujo tipo é outra classe ``BaseSettings`` do mesmo arquivo são subconfigurações
+    aninhadas (lidas com o prefixo da própria classe), não variáveis de ambiente.
+    """
     names: set[str] = set()
     lines = source.splitlines()
-    for match in BASESETTINGS_RE.finditer(source):
+    matches = list(BASESETTINGS_RE.finditer(source))
+    settings_classes = {m.group(1) for m in matches}
+    for match in matches:
         start = source.count("\n", 0, match.start()) + 1
-        indent: str | None = None
+        body: list[str] = []
         for line in lines[start:]:
-            if not line.strip() or line.lstrip().startswith("#"):
-                continue
-            current_indent = line[: len(line) - len(line.lstrip())]
-            if not current_indent:
+            if line.strip() and not line[0].isspace():
                 break
-            if indent is None:
-                indent = current_indent
-            if current_indent != indent:
+            body.append(line)
+        prefix_match = ENV_PREFIX_RE.search("\n".join(body))
+        prefix = prefix_match.group(1) if prefix_match else ""
+        for field_name, annotation, text in _class_fields(body):
+            if field_name in ("model_config", "Config"):
                 continue
-            field_match = FIELD_RE.match(line)
-            if field_match and field_match.group(2) not in ("model_config", "Config"):
-                name = field_match.group(2).upper()
-                if name not in IGNORED_ENV:
-                    names.add(name)
+            if settings_classes & set(ANNOTATION_NAMES_RE.findall(annotation)):
+                continue
+            alias = ALIAS_RE.search(text)
+            name = alias.group(1).upper() if alias else f"{prefix}{field_name}".upper()
+            if name not in IGNORED_ENV:
+                names.add(name)
     return names
+
+
+def _class_fields(body: list[str]) -> list[tuple[str, str, str]]:
+    """(nome, anotação, texto completo) de cada campo no primeiro nível do corpo da classe.
+
+    O texto inclui as linhas de continuação (``Field(...)`` em várias linhas); docstrings
+    são ignoradas para que linhas como ``Uso:`` não pareçam campos.
+    """
+    fields: list[tuple[str, str, list[str]]] = []
+    current: list[str] | None = None
+    indent: str | None = None
+    open_quote: str | None = None
+    for line in body:
+        stripped = line.strip()
+        if open_quote is not None:
+            if open_quote in stripped:
+                open_quote = None
+            continue
+        if not stripped or stripped.startswith("#"):
+            continue
+        mark = stripped[:3]
+        if mark in ('"""', "'''"):
+            if stripped.count(mark) == 1:
+                open_quote = mark
+            continue
+        line_indent = line[: len(line) - len(line.lstrip())]
+        if indent is None:
+            indent = line_indent
+        if line_indent != indent:
+            if current is not None and len(line_indent) > len(indent):
+                current.append(stripped)
+            continue
+        match = FIELD_RE.match(line)
+        current = None
+        if match:
+            current = [stripped]
+            fields.append((match.group(2), match.group(3), current))
+    return [(name, annotation, " ".join(text)) for name, annotation, text in fields]
 
 
 def node_env_refs(source: str) -> set[str]:

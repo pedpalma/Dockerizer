@@ -56,7 +56,7 @@ SPECS: dict[ServiceKind, ServiceSpec] = {
         ),
         frozenset({"pg", "postgres", "pg-promise"}),
         ("POSTGRES_", "PG"),
-        re.compile(r"^(?:[\w./-]+/)?(postgres|postgis)(:|$)"),
+        re.compile(r"^(?:[\w./-]+/)?(postgres|postgis|timescaledb|pgvector)(:|$)"),
     ),
     ServiceKind.MYSQL: ServiceSpec(
         ServiceKind.MYSQL,

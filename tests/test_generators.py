@@ -225,6 +225,8 @@ def test_port_conflict_assigns_next_free_port(make_project: Factory) -> None:
 def test_postgres_18_uses_new_data_path() -> None:
     assert postgres_data_path("postgres:18-alpine") == "/var/lib/postgresql"
     assert postgres_data_path("postgres:17-alpine") == "/var/lib/postgresql/data"
+    assert postgres_data_path("timescale/timescaledb:2.29.1-pg17") == "/var/lib/postgresql/data"
+    assert postgres_data_path("pgvector/pgvector:pg18") == "/var/lib/postgresql"
 
 
 # --- variáveis de ambiente -------------------------------------------------------------------
