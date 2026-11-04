@@ -1,0 +1,60 @@
+# Gerado pelo Dockerizer — arquivos que não devem entrar no contexto de build.
+# Segredos
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Controle de versão e ferramentas
+.git
+.dockerizer
+.idea
+.vscode
+.DS_Store
+
+# Arquivos Docker
+Dockerfile
+.dockerignore
+compose.yaml
+compose.yml
+docker-compose*.yml
+docker-compose*.yaml
+{% if language == "python" %}
+
+# Python
+**/__pycache__
+**/*.py[cod]
+.venv
+venv
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.tox
+.coverage
+htmlcov
+*.egg-info
+{% else %}
+
+# Node.js
+node_modules
+**/node_modules
+.next
+.nuxt
+{% if exclude_build_outputs %}
+dist
+build
+{% endif %}
+coverage
+.turbo
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+{% endif %}
+{% if nested %}
+
+# Outras aplicações do projeto (possuem imagem própria)
+{% for path in nested %}
+{{ path }}
+{% endfor %}
+{% endif %}

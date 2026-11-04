@@ -1,0 +1,6 @@
+# Gerado pelo Dockerizer (modo {{ mode_label }}).
+# - Bancos de dados, cache e filas ficam na rede interna "data" e não são publicados no host.
+# - Dados persistentes ficam em volumes nomeados; "dockerizer down" e "dockerizer rollback"
+#   nunca removem volumes. Use "dockerizer purge" (com confirmação) para apagá-los.
+# - Variáveis sensíveis vêm do arquivo .env (veja .env.example).
+{{ body }}

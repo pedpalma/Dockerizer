@@ -1,0 +1,68 @@
+# syntax=docker/dockerfile:1
+# Gerado pelo Dockerizer — aplicação "{{ app.name }}" ({{ app.path }}), modo {{ mode_label }}.
+# Edições manuais são detectadas pelo Dockerizer e preservadas (veja "dockerizer rollback").
+FROM python:{{ app.language_version }}-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1{% if app.python_path %} \
+    PYTHONPATH=/app/{{ app.python_path }}{% endif %}
+
+
+WORKDIR /app
+
+# Usuário sem privilégios para executar a aplicação.
+RUN groupadd --system --gid 10001 app \
+ && useradd --system --uid 10001 --gid app --home-dir /app --shell /usr/sbin/nologin app
+
+{% if pm == "uv" %}
+# Dependências instaladas com uv a partir do uv.lock (camada reaproveitada enquanto o lock não mudar).
+COPY --from={{ uv_image }} /uv /uvx /bin/
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    PATH="/opt/venv/bin:$PATH"
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project{% if not dev %} --no-dev{% endif %}
+
+{% elif pm == "poetry" %}
+# Dependências instaladas com Poetry (sem virtualenv dentro da imagem).
+ENV POETRY_VIRTUALENVS_CREATE=false \
+    POETRY_NO_INTERACTION=1
+RUN --mount=type=cache,target=/root/.cache/pip pip install "poetry>=1.8,<3"
+COPY {{ app.dependency_files | join(" ") }} ./
+RUN --mount=type=cache,target=/root/.cache/pypoetry \
+    poetry install --no-root --no-ansi{% if not dev %} --only main{% endif %}
+
+{% elif requirement_files %}
+# Dependências instaladas com pip a partir dos arquivos requirements.
+{% for file in requirement_files %}
+COPY {{ file }} {{ file }}
+{% endfor %}
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r {{ requirement_files[0] }}{% if dev and dev_requirement %} -r {{ dev_requirement }}{% endif %}
+
+{% elif app.inline_dependencies %}
+# Dependências extraídas de pyproject.toml ([project].dependencies).
+# Rode "dockerizer setup" novamente se elas mudarem.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install {{ app.inline_dependencies | map("shell_quote") | join(" ") }}
+
+{% endif %}
+COPY --chown=app:app . .
+{% if pm == "uv" %}
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen{% if not dev %} --no-dev{% endif %}
+
+{% elif install_project %}
+RUN --mount=type=cache,target=/root/.cache/pip pip install .
+
+{% endif %}
+USER app
+{% if port %}
+
+EXPOSE {{ port }}
+{% endif %}
+
+CMD {{ command | exec_form }}
