@@ -209,10 +209,10 @@ def test_purge_requires_typed_confirmation(make_project: Factory, fake_docker: F
     root = make_project(FASTAPI_PROJECT)
     assert run("setup", str(root), "--yes")[0] == 0
     fake_docker.outputs["volume ls"] = "projeto-dockerizer_postgres_data\n"
-    code, output = run("purge", str(root), input="errado\n")
+    code, output = run("purge", str(root), input="n\nerrado\n")
     assert code == 1 and "incorreta" in output
     assert "volume rm" not in fake_docker.commands()
-    code, output = run("purge", str(root), input="projeto-dockerizer\n")
+    code, output = run("purge", str(root), input="n\nprojeto-dockerizer\n")
     assert code == 0, output
     assert ["docker", "volume", "rm", "projeto-dockerizer_postgres_data"] in fake_docker.calls
 

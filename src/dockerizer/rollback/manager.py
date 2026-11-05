@@ -214,9 +214,14 @@ def execute_rollback(
     return result
 
 
-def _remove_tool_dir(store: ManifestStore) -> None:
+def _remove_tool_dir(store: ManifestStore) -> bool:
+    """Remove ``.dockerizer/``, exceto se houver dumps de dados (mesmo fora do manifesto)."""
+    backups = store.data_backups_dir
+    if backups.is_dir() and any(backups.iterdir()):
+        return False
     if store.tool_dir.is_dir() and not store.tool_dir.is_symlink():
         shutil.rmtree(store.tool_dir)
+    return True
 
 
 def _finalize(store: ManifestStore, manifest: Manifest, result: RollbackResult) -> bool:
@@ -224,11 +229,13 @@ def _finalize(store: ManifestStore, manifest: Manifest, result: RollbackResult) 
     if manifest.files or not result.docker_cleaned:
         store.save(manifest)
         return False
-    if result.volumes_preserved or manifest.preserved_backups:
-        # Mantém manifesto (para purge) e credenciais (para reutilizar os volumes preservados).
+    if result.volumes_preserved or manifest.preserved_backups or manifest.data_backups:
+        # Mantém manifesto (para purge e restore) e credenciais (para reutilizar os volumes).
         store.save(manifest)
         return False
-    _remove_tool_dir(store)
+    if not _remove_tool_dir(store):
+        store.save(manifest)
+        return False
     return True
 
 
@@ -262,8 +269,7 @@ def execute_purge(
     if manifest.docker is not None:
         manifest.docker.volumes = []
     store.credentials_path.unlink(missing_ok=True)
-    if not manifest.files and not manifest.preserved_backups:
-        _remove_tool_dir(store)
-    else:
+    keep = bool(manifest.files or manifest.preserved_backups or manifest.data_backups)
+    if keep or not _remove_tool_dir(store):  # só remove se nada mais depender de .dockerizer/
         store.save(manifest)
     return True

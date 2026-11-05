@@ -11,6 +11,15 @@ import typer
 
 from dockerizer import __version__
 from dockerizer.analyzers.project import analyze_project
+from dockerizer.backup.dumps import (
+    BackupError,
+    create_backup,
+    data_services,
+    find_backup,
+    restore_backup,
+    running_apps,
+    verify_backup,
+)
 from dockerizer.cli import i18n, ui
 from dockerizer.constants import COMPOSE_FILE, HOST_ENV_FILE, TOOL_DIR, compose_project_name
 from dockerizer.docker.manager import (
@@ -39,6 +48,7 @@ from dockerizer.rollback.manager import (
     plan_rollback,
 )
 from dockerizer.rollback.manifest import (
+    BackupReason,
     DockerResources,
     Manifest,
     ManifestError,
@@ -613,6 +623,11 @@ def rollback(
             + ", ".join(result.volumes_preserved)
             + ". Para apagá-los definitivamente: dockerizer purge"
         )
+    if manifest.data_backups:
+        ui.warn(
+            f"Backups de dados preservados em {TOOL_DIR}/data-backups/: o Dockerizer nunca os "
+            "apaga. Remova-os manualmente quando não precisar mais deles."
+        )
     if result.tool_dir_removed:
         ui.success(f"Reversão concluída; {TOOL_DIR}/ removido.")
     elif not result.conflicts:
@@ -647,16 +662,13 @@ def purge(path: PathArg = None, path_opt: PathOpt = None, dry_run: DryRun = Fals
         docker.remove_volumes(plan.volumes)
         ui.info("[bold]Dry-run:[/bold] nenhum volume removido.")
         return
-    project = (
-        manifest.docker.compose_project
-        if manifest.docker
-        else compose_project_name(manifest.project_name)
-    )
-    try:
-        typed = typer.prompt(f"Para confirmar, digite o nome do projeto ({project})")
-    except typer.Abort:
-        fail("Operação cancelada; nenhum volume removido.")
-    if typed.strip() != project:
+    if _offer_backup_before_purge(root, store, manifest, docker):
+        plan = plan_purge(manifest, docker)  # o backup sobe e derruba a infraestrutura
+        if plan.running_containers:
+            fail("Há containers do projeto existentes. Execute 'dockerizer down' antes do purge.")
+    project = _compose_project(manifest)
+    typed = _typed_confirmation(project, "nenhum volume removido")
+    if typed != project:
         fail("Confirmação incorreta; nenhum volume removido.")
     try:
         removed = execute_purge(store, manifest, docker, plan)
@@ -665,6 +677,159 @@ def purge(path: PathArg = None, path_opt: PathOpt = None, dry_run: DryRun = Fals
     if not removed:
         fail("Falha ao remover os volumes.")
     ui.success("Volumes removidos.")
+
+
+def _compose_project(manifest: Manifest) -> str:
+    if manifest.docker:
+        return manifest.docker.compose_project
+    return compose_project_name(manifest.project_name)
+
+
+def _typed_confirmation(project: str, cancelled: str) -> str:
+    try:
+        return str(typer.prompt(f"Para confirmar, digite o nome do projeto ({project})")).strip()
+    except typer.Abort:
+        fail(f"Operação cancelada; {cancelled}.")
+
+
+def _run_backup(
+    store: ManifestStore,
+    manifest: Manifest,
+    docker: DockerManager,
+    services: list[str],
+    reason: BackupReason,
+) -> str | None:
+    """Gera o backup e o exibe; devolve o id (``None`` em dry-run)."""
+    try:
+        backup = create_backup(store, manifest, docker, services, reason)
+    except BackupError as exc:
+        fail(str(exc))
+    if backup is None:
+        return None
+    location = (store.data_backups_dir / backup.id).relative_to(store.root).as_posix() + "/"
+    ui.show_backup(backup, location)
+    return backup.id
+
+
+def _offer_backup_before_purge(
+    root: Path, store: ManifestStore, manifest: Manifest, docker: DockerManager
+) -> bool:
+    """Pergunta (padrão: sim) se deve gerar um backup antes do purge. True se gerou."""
+    services, warnings = data_services(manifest)
+    for warning in warnings:
+        ui.warn(warning)
+    if not services:
+        return False
+    if not (root / (manifest.docker.compose_file if manifest.docker else COMPOSE_FILE)).is_file():
+        ui.warn(
+            f"{COMPOSE_FILE} não existe mais: não é possível subir os serviços para um backup. "
+            "Para fazê-lo, rode 'dockerizer setup' e 'dockerizer backup' antes do purge."
+        )
+        return False
+    if not ui.confirm("Gerar um backup dos dados antes de apagá-los?", True):
+        return False
+    require_docker(docker)
+    ui.info("Os serviços de dados serão iniciados só para o backup e parados em seguida.")
+    _run_backup(store, manifest, docker, services, "antes-do-purge")
+    return True
+
+
+@app.command()
+def backup(path: PathArg = None, path_opt: PathOpt = None, dry_run: DryRun = False) -> None:
+    """Gera um backup (dump) dos bancos e do Redis em .dockerizer/data-backups/."""
+    root = project_root(path, path_opt)
+    store = ManifestStore(root)
+    manifest = require_manifest(store)
+    services, warnings = data_services(manifest)
+    for warning in warnings:
+        ui.warn(warning)
+    if not services:
+        ui.info("Nenhum serviço de dados local com backup suportado neste projeto.")
+        return
+    docker = docker_for(root, manifest, manifest.project_name, dry_run=dry_run)
+    require_docker(docker)
+    _run_backup(store, manifest, docker, services, "manual")
+    if dry_run:
+        ui.info("[bold]Dry-run:[/bold] nenhum backup gerado.")
+        return
+    ui.info(
+        "O Dockerizer nunca apaga backups (nem no rollback ou purge). "
+        "Para restaurar: dockerizer restore"
+    )
+
+
+@app.command()
+def restore(
+    path: PathArg = None,
+    path_opt: PathOpt = None,
+    dry_run: DryRun = False,
+    backup_id: Annotated[
+        str | None,
+        typer.Option("--backup", help="ID do backup (padrão: o mais recente).", show_default=False),
+    ] = None,
+    list_only: Annotated[
+        bool, typer.Option("--list", help="Lista os backups disponíveis e sai.")
+    ] = False,
+) -> None:
+    """[red]Substitui[/red] os dados atuais pelos de um backup (com backup de segurança antes)."""
+    root = project_root(path, path_opt)
+    store = ManifestStore(root)
+    manifest = require_manifest(store)
+    if list_only or not manifest.data_backups:
+        if not manifest.data_backups:
+            fail("Nenhum backup registrado. Gere um com: dockerizer backup")
+        ui.show_backups(manifest.data_backups)
+        return
+    chosen = find_backup(manifest, backup_id)
+    if chosen is None:
+        fail(
+            f"Backup '{backup_id}' não encontrado. Veja os disponíveis com: dockerizer restore --list"
+        )
+    problems = verify_backup(store, chosen)
+    if problems:
+        fail("Backup corrompido; nada foi alterado. " + " ".join(problems))
+    services, _ = data_services(manifest)
+    restorable = [d.service for d in chosen.dumps if d.service in services]
+    for dump in chosen.dumps:
+        if dump.service not in services:
+            ui.warn(f"'{dump.service}' não existe mais no projeto; o dump dele será ignorado.")
+    if not restorable:
+        fail("Nenhum serviço do backup existe no projeto atual.")
+    docker = docker_for(root, manifest, manifest.project_name, dry_run=dry_run)
+    require_docker(docker)
+    try:
+        apps = running_apps(docker, services)
+    except BackupError as exc:
+        fail(str(exc))
+    if apps:
+        fail(
+            "Aplicações em execução (" + ", ".join(apps) + ") usam os dados. "
+            "Execute 'dockerizer down' antes do restore."
+        )
+    ui.show_backups([chosen])
+    ui.warn(
+        "Os dados atuais de " + ", ".join(restorable) + " serão substituídos pelos do backup "
+        f"{chosen.id}. Um backup de segurança do estado atual é gerado antes."
+    )
+    if dry_run:
+        try:
+            restore_backup(store, docker, chosen, restorable)
+        except BackupError as exc:
+            fail(str(exc))
+        ui.info("[bold]Dry-run:[/bold] nenhum dado alterado.")
+        return
+    project = _compose_project(manifest)
+    if _typed_confirmation(project, "nada foi alterado") != project:
+        fail("Confirmação incorreta; nada foi alterado.")
+    safety = _run_backup(store, manifest, docker, restorable, "antes-do-restore")
+    try:
+        restored = restore_backup(store, docker, chosen, restorable)
+    except BackupError as exc:
+        fail(f"{exc} O estado anterior está no backup {safety}.")
+    ui.success(
+        f"Dados restaurados ({', '.join(restored)}) a partir de {chosen.id}. "
+        f"Estado anterior salvo no backup {safety}."
+    )
 
 
 def main() -> None:

@@ -7,6 +7,7 @@ restante, e o projeto byte a byte igual ao original.
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Callable
 
 import pytest
@@ -73,11 +74,58 @@ def test_fastapi_postgres_redis_full_lifecycle(project: Project) -> None:
     assert json.loads(body) == {"visitas": 2, "hits": 2}  # mesma senha, dados preservados
 
     project.cli("down")
-    project.cli("purge", input="errado\n", expect=1)
+    project.cli("purge", input="n\nerrado\n", expect=1)
     assert len(project.volumes()) == 2
-    project.cli("purge", input=f"{project.compose_project}\n")
+    project.cli("purge", input=f"n\n{project.compose_project}\n")
     assert project.volumes() == []
     project.cli("rollback", "--yes", "--images")
+    project.assert_clean()
+
+
+def test_backup_restore_and_purge_with_backup(project: Project) -> None:
+    """backup → mais dados → restore volta ao backup; purge com backup → restore em volumes novos."""
+    project.write(FASTAPI_STACK)
+    project.cli("setup", "--yes", "--build", "--start")
+    project.wait_healthy("app", "postgres", "redis")
+    _, body = project.get("app", "/visit")
+    assert json.loads(body) == {"visitas": 1, "hits": 1}
+
+    output = project.cli("backup")  # com os serviços rodando: nada é parado
+    assert "postgres.dump" in output and "redis.rdb" in output
+    project.wait_healthy("app", "postgres", "redis")
+    _, body = project.get("app", "/visit")
+    assert json.loads(body) == {"visitas": 2, "hits": 2}
+
+    project.cli("restore", input=f"{project.compose_project}\n", expect=1)  # app rodando
+    project.cli("down")
+    output = project.cli("restore", input=f"{project.compose_project}\n")
+    assert "Dados restaurados (postgres, redis)" in output
+    assert project.containers() == []  # infraestrutura subiu só para o restore
+    project.cli("up")
+    project.wait_healthy("app", "postgres", "redis")
+    _, body = project.get("app", "/visit")
+    assert json.loads(body) == {"visitas": 2, "hits": 2}  # 1 do backup + esta visita
+
+    project.cli("down")
+    project.cli("purge", input=f"s\n{project.compose_project}\n")
+    assert project.volumes() == [] and project.containers() == []
+    project.cli("setup", "--yes", "--start")  # volumes novos, vazios
+    project.wait_healthy("app", "postgres", "redis")
+    project.cli("down")
+    project.cli("restore", input=f"{project.compose_project}\n")  # backup "antes-do-purge"
+    project.cli("up")
+    project.wait_healthy("app", "postgres", "redis")
+    _, body = project.get("app", "/visit")
+    assert json.loads(body) == {"visitas": 3, "hits": 3}  # dados de antes do purge
+
+    project.cli("down")
+    project.cli("purge", input=f"n\n{project.compose_project}\n")
+    output = project.cli("rollback", "--yes", "--images")
+    assert "data-backups" in output  # rollback avisa e mantém os backups
+    backups = project.root / ".dockerizer" / "data-backups"
+    # manual, antes-do-restore, antes-do-purge, antes-do-restore
+    assert len(list(backups.iterdir())) == 4
+    shutil.rmtree(project.root / ".dockerizer")  # apagar backups é decisão do usuário
     project.assert_clean()
 
 

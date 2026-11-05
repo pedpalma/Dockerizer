@@ -82,7 +82,7 @@ def test_rollback_and_purge_work_with_old_compose(
     assert run("setup", str(root), "--yes")[0] == 0
     fake_docker.outputs["compose version"] = OLD
     fake_docker.outputs["volume ls"] = "projeto-dockerizer_postgres_data\n"
-    code, output = run("purge", str(root), input="projeto-dockerizer\n")
+    code, output = run("purge", str(root), input="n\nprojeto-dockerizer\n")
     assert code == 0, output
     assert ["docker", "volume", "rm", "projeto-dockerizer_postgres_data"] in fake_docker.calls
     code, output = run("rollback", str(root), "--yes")

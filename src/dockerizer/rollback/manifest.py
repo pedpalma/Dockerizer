@@ -11,7 +11,13 @@ from typing import Literal
 from pydantic import BaseModel, Field, ValidationError
 
 from dockerizer.analyzers.env import parse_env_file
-from dockerizer.constants import BACKUPS_DIR, MANIFEST_FILE, REPORTS_DIR, TOOL_DIR
+from dockerizer.constants import (
+    BACKUPS_DIR,
+    DATA_BACKUPS_DIR,
+    MANIFEST_FILE,
+    REPORTS_DIR,
+    TOOL_DIR,
+)
 from dockerizer.fs.paths import atomic_write, read_text
 
 MANIFEST_VERSION = 1
@@ -56,6 +62,25 @@ class DockerResources(BaseModel):
     started: bool = False
 
 
+class DumpRecord(BaseModel):
+    service: str
+    file: str  # relativo a .dockerizer/
+    sha256: str
+    size: int
+
+
+BackupReason = Literal["manual", "antes-do-purge", "antes-do-restore"]
+
+
+class DataBackup(BaseModel):
+    """Backup lógico dos serviços de dados (``dockerizer backup``)."""
+
+    id: str
+    created_at: datetime = Field(default_factory=now)
+    reason: BackupReason = "manual"
+    dumps: list[DumpRecord] = Field(default_factory=list)
+
+
 class Manifest(BaseModel):
     version: int = MANIFEST_VERSION
     project_name: str
@@ -72,6 +97,8 @@ class Manifest(BaseModel):
     publish_ip: str | None = None
     # .env de origem do .env.docker → SHA-256 do conteúdo usado na geração.
     host_env_sources: dict[str, str] = Field(default_factory=dict)
+    # Backups dos bancos: mantêm .dockerizer/ mesmo após rollback e purge.
+    data_backups: list[DataBackup] = Field(default_factory=list)
 
     def record_for(self, path: str) -> FileRecord | None:
         return self.files.get(path)
@@ -94,6 +121,7 @@ class ManifestStore:
         self.backups_dir = self.tool_dir / BACKUPS_DIR
         self.reports_dir = self.tool_dir / REPORTS_DIR
         self.credentials_path = self.tool_dir / CREDENTIALS_FILE
+        self.data_backups_dir = self.tool_dir / DATA_BACKUPS_DIR
 
     def exists(self) -> bool:
         return self.path.is_file()

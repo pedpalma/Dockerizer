@@ -76,6 +76,11 @@ def make_project(tmp_path: Path) -> Callable[..., Path]:
 
 # Saídas padrão da Docker simulada (substituíveis por teste via ``outputs``).
 DEFAULT_OUTPUTS = {"compose version": "Docker Compose version v2.29.7"}
+DEFAULT_DUMPS = {
+    "postgres": b"PGDMP\x01\x0e\x00dados-postgres",
+    "mysql": b"-- MySQL dump 10.13\nINSERT INTO t VALUES (1);\n",
+    "redis": b"REDIS0011\xfadados-redis",
+}
 
 
 @dataclass
@@ -86,9 +91,20 @@ class FakeDocker:
     failures: set[str] = field(default_factory=set)
     outputs: dict[str, str] = field(default_factory=dict)
     available: bool = True
+    # Conteúdo gravado por "compose exec" com saída em arquivo (dumps), por serviço.
+    dumps: dict[str, bytes] = field(default_factory=lambda: dict(DEFAULT_DUMPS))
+    # (serviço, conteúdo) recebido por "compose exec" com entrada de arquivo (restore).
+    received: list[tuple[str, bytes]] = field(default_factory=list)
 
     def __call__(
-        self, args: Sequence[str], *, capture: bool, timeout: float | None, cwd: Path
+        self,
+        args: Sequence[str],
+        *,
+        capture: bool,
+        timeout: float | None,
+        cwd: Path,
+        stdin: Path | None = None,
+        stdout: Path | None = None,
     ) -> CommandResult:
         from dockerizer.docker.manager import CommandResult
 
@@ -99,6 +115,11 @@ class FakeDocker:
         key = self.key(argv)
         if key in self.failures:
             return CommandResult(argv, 1, "", f"falha simulada: {key}")
+        service = argv[argv.index("-T") + 1] if "-T" in argv else ""
+        if stdout is not None:
+            stdout.write_bytes(self.dumps.get(service, b""))
+        if stdin is not None:
+            self.received.append((service, stdin.read_bytes()))
         return CommandResult(argv, 0, self.outputs.get(key, DEFAULT_OUTPUTS.get(key, "")), "")
 
     @staticmethod
