@@ -58,6 +58,22 @@ def runtime_argv(command: Command, manager: PackageManager) -> list[str]:
     return argv
 
 
+# Variáveis do .env com o UID/GID de quem roda o Dockerizer (só no modo de desenvolvimento).
+DEV_UID_VAR = "DOCKERIZER_UID"
+DEV_GID_VAR = "DOCKERIZER_GID"
+# UID/GID padrão do usuário da imagem (sem a variável no .env, a imagem fica como antes).
+DEFAULT_APP_IDS = {Language.PYTHON: "10001", Language.NODE: "1000"}
+
+
+def uses_dev_identity(app: Application, mode: Mode) -> bool:
+    """Imagem gerada pelo Dockerizer com o código do host montado (modo de desenvolvimento)."""
+    return (
+        mode is Mode.DEVELOPMENT
+        and app.existing_dockerfile is None
+        and app.build_context in (None, app.path)
+    )
+
+
 def render_dockerfile(app: Application, mode: Mode, existing_files: set[str]) -> str:
     process = main_process(app)
     if process is None:
@@ -97,6 +113,7 @@ def _python(app: Application, mode: Mode, process: Process) -> str:
         port=process.port_for(mode) if process.kind is ProcessKind.WEB else None,
         command=command.argv,
         data_dirs=[d.path for d in app.data_dirs],
+        dev_identity=uses_dev_identity(app, mode),
     )
 
 
@@ -156,6 +173,7 @@ def _node(app: Application, mode: Mode, process: Process, existing: set[str]) ->
         data_dirs=[d.path for d in app.data_dirs],
         standalone=standalone,
         has_public=app.has_public_dir,
+        dev_identity=uses_dev_identity(app, mode),
     )
 
 

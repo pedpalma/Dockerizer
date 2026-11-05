@@ -11,9 +11,19 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+{% if dev_identity %}
+# Usuário sem privilégios com o UID/GID de quem roda o Dockerizer (DOCKERIZER_UID e
+# DOCKERIZER_GID no .env): arquivos criados no código montado continuam sendo seus.
+ARG APP_UID=10001
+ARG APP_GID=10001
+RUN groupadd --non-unique --gid "$APP_GID" app \
+ && useradd --non-unique --no-log-init --uid "$APP_UID" --gid app --home-dir /app \
+    --shell /usr/sbin/nologin app
+{% else %}
 # Usuário sem privilégios para executar a aplicação.
 RUN groupadd --system --gid 10001 app \
  && useradd --system --uid 10001 --gid app --home-dir /app --shell /usr/sbin/nologin app
+{% endif %}
 
 {% if pm == "uv" %}
 # Dependências instaladas com uv a partir do uv.lock (camada reaproveitada enquanto o lock não mudar).

@@ -165,7 +165,7 @@ com `--path`. Sem nenhum dos dois, o diretório atual é usado.
 | `compose.yaml` | Serviços, redes, volumes, healthchecks, dependências e políticas de reinicialização | Conflito: exige `--force` (com backup) |
 | `.dockerignore` | Exclui `.env`, `.git`, dependências e caches do contexto de build | Preservado (com aviso se não excluir `.env`) |
 | `.env.example` | Variáveis identificadas, **sem segredos** | Preservado |
-| `.env` | Credenciais geradas localmente (permissão `600`) | Recebe **apenas** variáveis de infraestrutura ausentes; nada é sobrescrito |
+| `.env` | Credenciais geradas localmente (permissão `600`) e, com `--dev`, o seu UID/GID | Recebe **apenas** variáveis ausentes; nada é sobrescrito |
 | `.env.docker` | Só com serviços **do host**: as variáveis do `.env` com `localhost` trocado por `host.docker.internal` (permissão `600`) | Conflito: exige `--force` (com backup) |
 | `.gitignore` | Acrescenta `.env`, `.dockerizer/` (e `.env.docker`, quando gerado) | Complementado (com backup) |
 
@@ -181,6 +181,11 @@ Decisões de segurança do Compose gerado:
   `api/health` do Next.js...), o teste é uma requisição HTTP (sem seguir redirecionamentos;
   qualquer status abaixo de 500 é saudável); senão, a porta TCP.
 - Containers de aplicação usam `no-new-privileges`, `init` e usuário não root.
+- No modo `--dev`, esse usuário tem o **seu** UID/GID (`DOCKERIZER_UID` e `DOCKERIZER_GID`,
+  gravados no `.env` pelo `setup`): migrações, uploads e caches criados pelo container no
+  código montado continuam sendo seus, sem `sudo chown`. Para root, grupo root ou Windows o
+  usuário padrão é mantido (UID 10001 no Python, `node` no Node.js), e a imagem de produção
+  não muda. Para outro UID, edite o `.env` e reconstrua (`dockerizer setup . --dev --build`).
 - Senhas vêm do `.env` via interpolação obrigatória (`${VAR:?}`), nunca do Dockerfile.
 - Migrações (Alembic/Django) rodam num serviço próprio antes da aplicação **apenas quando o
   banco é local** — nunca contra um banco externo.
@@ -354,8 +359,9 @@ dockerizer up .
   diferente da pasta da aplicação, o código não é montado no modo `--dev`.
 - Dependências extraídas de `pyproject.toml` sem lockfile são copiadas para o Dockerfile:
   rode `dockerizer setup` novamente quando elas mudarem.
-- No modo `--dev`, o container Python roda com UID 10001: arquivos criados pelo container no
-  código montado podem ficar com outro dono.
+- No modo `--dev`, volumes nomeados criados antes com outro UID (ex.: num `setup` de produção)
+  mantêm o dono antigo; use `dockerizer purge` (com backup) se a aplicação não conseguir
+  gravar neles.
 - O rollback remove containers e redes; as imagens construídas só com `rollback --images`.
 - URLs de conexão montadas pelo Compose assumem senhas sem caracteres especiais de URL (as
   geradas pelo Dockerizer já seguem essa regra).

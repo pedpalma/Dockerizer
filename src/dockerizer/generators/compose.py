@@ -15,7 +15,14 @@ import yaml
 
 from dockerizer.analyzers.infrastructure import SPECS
 from dockerizer.constants import MANAGED_LABEL, compose_project_name
-from dockerizer.generators.dockerfile import MODE_LABELS, main_process
+from dockerizer.generators.dockerfile import (
+    DEFAULT_APP_IDS,
+    DEV_GID_VAR,
+    DEV_UID_VAR,
+    MODE_LABELS,
+    main_process,
+    uses_dev_identity,
+)
 from dockerizer.generators.templating import render
 from dockerizer.models.architecture import (
     Application,
@@ -404,6 +411,12 @@ def build_compose(
         build = build_section(app)
         if app.build_args and mode is Mode.PRODUCTION:
             build["args"] = {arg: f"${{{arg}:-}}" for arg in app.build_args}
+        if uses_dev_identity(app, mode):
+            default = DEFAULT_APP_IDS[app.language]
+            build["args"] = {
+                "APP_UID": f"${{{DEV_UID_VAR}:-{default}}}",
+                "APP_GID": f"${{{DEV_GID_VAR}:-{default}}}",
+            }
         env_files = [{"path": f, "required": False} for f in app_env_files.get(app.name, [])]
         depends: dict[str, Any] = {s.kind.value: {"condition": "service_healthy"} for s in used}
         migrate_name: str | None = None
