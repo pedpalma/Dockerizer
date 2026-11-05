@@ -98,6 +98,11 @@ dockerizer logs . --service app --follow
 dockerizer down .
 dockerizer up .
 
+# Backup dos bancos e do Redis, e restauração (com backup de segurança antes)
+dockerizer backup .
+dockerizer restore . --list
+dockerizer down . && dockerizer restore .
+
 # Desfazer tudo o que a ferramenta fez (volumes são preservados)
 dockerizer rollback .
 ```
@@ -127,7 +132,9 @@ Serviços de infraestrutura
 | `validate` | Valida a configuração (estática e via `docker compose config`). |
 | `status` | Exibe o estado e a saúde dos serviços. |
 | `rollback` | Desfaz as alterações realizadas pela ferramenta. |
-| `purge` | Remove **definitivamente** os volumes do projeto (confirmação própria). |
+| `backup` | Gera um dump dos bancos e do Redis em `.dockerizer/data-backups/`. |
+| `restore` | Substitui os dados atuais pelos de um backup (confirmação própria e backup de segurança antes). |
+| `purge` | Remove **definitivamente** os volumes do projeto (confirmação própria; oferece backup antes). |
 
 O caminho do projeto pode ser informado como argumento (`dockerizer setup ./meu-projeto`) ou
 com `--path`. Sem nenhum dos dois, o diretório atual é usado.
@@ -137,7 +144,7 @@ com `--path`. Sem nenhum dos dois, o diretório atual é usado.
 | Parâmetro | Comandos | Descrição |
 |---|---|---|
 | `--path` | todos | Caminho do projeto. |
-| `--dry-run` | `setup`, `up`, `down`, `rollback`, `purge` | Mostra as operações planejadas sem executá-las: nenhum arquivo é escrito e nenhum comando Docker que altere estado é executado. |
+| `--dry-run` | `setup`, `up`, `down`, `rollback`, `backup`, `restore`, `purge` | Mostra as operações planejadas sem executá-las: nenhum arquivo é escrito e nenhum comando Docker que altere estado é executado. |
 | `--yes`, `-y` | `setup`, `rollback` | Dispensa confirmações **não destrutivas** e aceita valores sugeridos. Perguntas sem valor padrão seguro continuam exigindo resposta. |
 | `--force` | `setup`, `rollback` | Permite substituir arquivos preexistentes ou editados manualmente — **sempre com backup**. Nunca ignora proteções contra perda de dados. |
 | `--build` | `setup` | Constrói as imagens. |
@@ -147,6 +154,8 @@ com `--path`. Sem nenhum dos dois, o diretório atual é usado.
 | `--diff` | `setup` | Mostra o conteúdo que seria gravado em cada arquivo (diff unificado; senhas, tokens e URLs com credenciais aparecem como `********`). Combine com `--dry-run` para revisar sem gravar. |
 | `--host-ip` | `setup` | Endereço em que as portas são publicadas (ex.: `127.0.0.1`, `0.0.0.0`). Padrão: `127.0.0.1` se o projeto tem nginx, senão todas as interfaces. A escolha é lembrada. |
 | `--images` | `rollback` | Remove também as imagens construídas pelo Dockerizer (nunca imagens base). |
+| `--backup ID` | `restore` | Backup a restaurar (padrão: o mais recente). |
+| `--list` | `restore` | Lista os backups disponíveis. |
 
 ## O que é gerado
 
@@ -243,6 +252,7 @@ Toda alteração é registrada em `.dockerizer/`:
 ├── manifest.json     # arquivos criados/modificados, hashes SHA-256, execuções, recursos Docker
 ├── credentials.env   # credenciais da infraestrutura local (mantidas enquanto houver volumes)
 ├── backups/          # cópias dos originais antes de qualquer modificação
+├── data-backups/     # dumps dos bancos (dockerizer backup); nunca removidos pela ferramenta
 └── reports/          # relatórios gerados com --report
 ```
 
@@ -261,7 +271,7 @@ Toda alteração é registrada em `.dockerizer/`:
    reversão.
 
 `.dockerizer/` só é removido quando nada mais depende dele (sem volumes preservados, sem
-backups de versões editadas e sem conflitos pendentes).
+backups de versões editadas, sem backups de dados e sem conflitos pendentes).
 
 O Dockerizer **nunca** executa operações globais como `docker system prune`, e uma guarda
 interna bloqueia `docker compose down -v` e remoção de volumes fora do comando `purge`.
@@ -281,8 +291,38 @@ interna bloqueia `docker compose down -v` e remoção de volumes fora do comando
   ```
 
   O `purge` só remove volumes do projeto Compose registrado e declarados pelo Dockerizer, e
-  recusa-se a executar enquanto houver containers do projeto.
-- Faça backup dos dados (ex.: `pg_dump`) antes de qualquer `purge`.
+  recusa-se a executar enquanto houver containers do projeto. Antes da confirmação, ele
+  pergunta se deve gerar um backup (padrão: sim); se o backup falhar, nada é apagado.
+
+### Backup e restauração
+
+```bash
+dockerizer backup .                  # dump de PostgreSQL, MySQL/MariaDB e Redis
+dockerizer restore . --list          # backups disponíveis
+dockerizer down .                    # o restore exige as aplicações paradas
+dockerizer restore .                 # o mais recente (ou --backup <ID>)
+dockerizer up .
+```
+
+- Os dumps são gerados **dentro** de cada container (`pg_dump --format=custom`, `mysqldump`
+  ou `mariadb-dump` com `--single-transaction`, `SAVE` do Redis), com as credenciais do próprio
+  container: nenhuma senha aparece na linha de comando do host.
+- Ficam em `.dockerizer/data-backups/<id>/` com permissão 600 (diretório 700), já ignorados
+  pelo `.gitignore` e pelo `.dockerignore`. O SHA-256 de cada arquivo é registrado e conferido
+  antes de restaurar; um dump alterado ou incompleto é recusado.
+- Se os serviços estão parados, **só a infraestrutura** é iniciada para a operação e volta ao
+  estado anterior em seguida, mesmo em caso de falha. Com tudo rodando, nada é interrompido.
+- O `restore` exige digitar o nome do projeto e gera antes um **backup de segurança** do
+  estado atual. O PostgreSQL é restaurado numa única transação (falhou, nada muda); objetos
+  criados depois do backup e que não existem nele são mantidos. O Redis é parado, recebe o
+  arquivo e é iniciado de novo.
+- Funciona também depois de um `purge`: rode `dockerizer setup . --start`, `down` e `restore`
+  para recriar os dados em volumes novos.
+- O Dockerizer **nunca apaga backups**, nem no `rollback` nem no `purge`. Apague
+  `.dockerizer/data-backups/` manualmente quando não precisar mais deles. Para guardar uma
+  cópia em outro lugar, basta copiar o diretório do backup.
+- RabbitMQ não entra no backup (mensagens em fila não são exportáveis de forma segura), nem os
+  volumes de dados das aplicações (uploads etc.); o comando avisa quando eles existem.
 
 ## Segurança
 
@@ -325,6 +365,8 @@ interna bloqueia `docker compose down -v` e remoção de volumes fora do comando
 - systemd: especificadores (`%i`, `%h`) e units `Type=oneshot` são ignorados; supervisor:
   expansões `%(...)s` são ignoradas; pm2 em modo cluster vira um processo por serviço.
 - Dados de diretórios do host e de bancos do host não são migrados para volumes.
+- `backup`/`restore` cobrem PostgreSQL, MySQL/MariaDB e Redis com a configuração gerada pelo
+  Dockerizer (Redis sem AOF, em `/data`); RabbitMQ e volumes das aplicações não são incluídos.
 - Algumas mensagens internas raras do Typer podem aparecer em inglês.
 
 ## Estrutura do código
@@ -341,8 +383,9 @@ src/dockerizer/
 ├── fs/             # caminhos seguros, hashes, planejamento/aplicação de mudanças
 ├── docker/         # wrapper da Docker CLI com guarda contra operações destrutivas
 ├── rollback/       # manifesto, reversão e purge
+├── backup/         # dumps e restauração dos bancos e do Redis
 ├── validators/     # validação estática e via docker compose config
-└── reporting/      # relatórios Markdown/JSON
+└── reporting/      # relatórios Markdown/JSON e diff do setup
 ```
 
 Para adicionar uma tecnologia: crie um analisador em `analyzers/` (Python e Node.js servem de

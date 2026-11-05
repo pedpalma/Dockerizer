@@ -6,6 +6,8 @@ TOOL_DIR: Final = ".dockerizer"
 MANIFEST_FILE: Final = "manifest.json"
 BACKUPS_DIR: Final = "backups"
 REPORTS_DIR: Final = "reports"
+# Dumps dos bancos (dockerizer backup). Nunca removidos pelo Dockerizer, nem no rollback/purge.
+DATA_BACKUPS_DIR: Final = "data-backups"
 
 COMPOSE_FILE: Final = "compose.yaml"
 # Cópia do .env para os containers, com localhost trocado por host.docker.internal.

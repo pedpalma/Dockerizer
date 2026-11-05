@@ -16,6 +16,7 @@ from dockerizer.fs.changes import ChangeAction, PlannedChange
 from dockerizer.generators.plan import PortAssignment
 from dockerizer.models.architecture import ProjectAnalysis, Question, QuestionKind
 from dockerizer.rollback.manager import ItemStatus, RollbackPlan
+from dockerizer.rollback.manifest import DataBackup
 from dockerizer.validators.validation import Level, ValidationResult
 
 console = Console(soft_wrap=True, highlight=False)
@@ -316,4 +317,38 @@ def show_rollback_plan(plan: RollbackPlan) -> None:
     for item in plan.items:
         style = styles[item.status]
         table.add_row(item.record.path, f"[{style}]{item.status.value}[/{style}]", item.reason)
+    console.print(table)
+
+
+def _size(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{size} B"
+
+
+def show_backup(backup: DataBackup, location: str) -> None:
+    table = Table(title=f"Backup {backup.id}")
+    for column in ("Serviço", "Arquivo", "Tamanho"):
+        table.add_column(column)
+    for dump in backup.dumps:
+        table.add_row(dump.service, escape(dump.file), _size(dump.size))
+    console.print(table)
+    success(f"Backup salvo em {location} (permissão 600; não versione).")
+
+
+def show_backups(backups: list[DataBackup]) -> None:
+    table = Table(title="Backups de dados")
+    for column in ("ID", "Criado em (UTC)", "Motivo", "Serviços", "Tamanho"):
+        table.add_column(column)
+    for backup in backups:
+        table.add_row(
+            backup.id,
+            f"{backup.created_at:%Y-%m-%d %H:%M}",
+            backup.reason,
+            ", ".join(d.service for d in backup.dumps),
+            _size(sum(d.size for d in backup.dumps)),
+        )
     console.print(table)

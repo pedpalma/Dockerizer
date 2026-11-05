@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -48,23 +49,51 @@ class CommandResult:
 
 class Runner(Protocol):
     def __call__(
-        self, args: Sequence[str], *, capture: bool, timeout: float | None, cwd: Path
+        self,
+        args: Sequence[str],
+        *,
+        capture: bool,
+        timeout: float | None,
+        cwd: Path,
+        stdin: Path | None = None,
+        stdout: Path | None = None,
     ) -> CommandResult: ...
 
 
 def subprocess_runner(
-    args: Sequence[str], *, capture: bool, timeout: float | None, cwd: Path
+    args: Sequence[str],
+    *,
+    capture: bool,
+    timeout: float | None,
+    cwd: Path,
+    stdin: Path | None = None,
+    stdout: Path | None = None,
 ) -> CommandResult:
+    """Executa sem shell. ``stdin``/``stdout`` ligam a entrada/saída a arquivos (dumps binários)."""
     argv = list(args)
     try:
-        proc = subprocess.run(
-            argv, cwd=cwd, capture_output=capture, text=True, timeout=timeout, check=False
-        )
+        if stdin is None and stdout is None:
+            proc = subprocess.run(
+                argv, cwd=cwd, capture_output=capture, text=True, timeout=timeout, check=False
+            )
+            return CommandResult(argv, proc.returncode, proc.stdout or "", proc.stderr or "")
+        with ExitStack() as stack:
+            source: Any = stack.enter_context(stdin.open("rb")) if stdin else subprocess.DEVNULL
+            target: Any = subprocess.PIPE
+            if stdout:
+                # O arquivo de destino já existe (criado com permissão 600): só é truncado.
+                target = stack.enter_context(stdout.open("r+b"))
+                target.truncate()
+            raw = subprocess.run(
+                argv, cwd=cwd, stdin=source, stdout=target, stderr=subprocess.PIPE,
+                timeout=timeout, check=False,
+            )  # fmt: skip
+        out = raw.stdout.decode(errors="replace") if isinstance(raw.stdout, bytes) else ""
+        return CommandResult(argv, raw.returncode, out, raw.stderr.decode(errors="replace"))
     except FileNotFoundError:
         return CommandResult(argv, 127, "", f"Executável não encontrado: {argv[0]}")
     except subprocess.TimeoutExpired:
         return CommandResult(argv, 124, "", f"Tempo esgotado ao executar: {' '.join(argv)}")
-    return CommandResult(argv, proc.returncode, proc.stdout or "", proc.stderr or "")
 
 
 class UnsafeDockerOperation(Exception):
@@ -108,13 +137,19 @@ class DockerManager:
         capture: bool = True,
         timeout: float | None = DEFAULT_TIMEOUT,
         allow_volume_removal: bool = False,
+        stdin: Path | None = None,
+        stdout: Path | None = None,
     ) -> CommandResult:
         guard(args, allow_volume_removal=allow_volume_removal)
         if self.on_command and (mutating or not capture):
             self.on_command(args, self.dry_run and mutating)
         if self.dry_run and mutating:
             return CommandResult(args, 0, dry_run=True)
-        return self.runner(args, capture=capture, timeout=timeout, cwd=self.root)
+        if stdin is None and stdout is None:
+            return self.runner(args, capture=capture, timeout=timeout, cwd=self.root)
+        return self.runner(
+            args, capture=capture, timeout=timeout, cwd=self.root, stdin=stdin, stdout=stdout
+        )
 
     def compose_args(self, *args: str) -> list[str]:
         return [
@@ -174,6 +209,45 @@ class DockerManager:
         if service:
             args.append(service)
         return self._run(args, mutating=False, capture=False, timeout=LONG_TIMEOUT)
+
+    def start_services(self, services: list[str]) -> CommandResult:
+        """Sobe só os serviços indicados e espera ficarem saudáveis (usado por backup/restore)."""
+        return self._run(
+            self.compose_args("up", "--detach", "--wait", "--wait-timeout", "180", *services),
+            mutating=True,
+            capture=False,
+            timeout=LONG_TIMEOUT,
+        )
+
+    def stop_services(self, services: list[str]) -> CommandResult:
+        return self._run(
+            self.compose_args("stop", *services), mutating=True, capture=False, timeout=LONG_TIMEOUT
+        )
+
+    def exec_to_file(self, service: str, script: str, destination: Path) -> CommandResult:
+        """Executa ``script`` no container e grava a saída em ``destination`` (sem passar pela
+        memória nem pelo terminal: dumps podem ser grandes e binários)."""
+        return self._run(
+            self.compose_args("exec", "-T", service, "sh", "-c", script),
+            mutating=True,
+            timeout=LONG_TIMEOUT,
+            stdout=destination,
+        )
+
+    def exec_from_file(self, service: str, script: str, source: Path) -> CommandResult:
+        return self._run(
+            self.compose_args("exec", "-T", service, "sh", "-c", script),
+            mutating=True,
+            timeout=LONG_TIMEOUT,
+            stdin=source,
+        )
+
+    def copy_into(self, service: str, source: Path, destination: str) -> CommandResult:
+        return self._run(
+            self.compose_args("cp", str(source), f"{service}:{destination}"),
+            mutating=True,
+            timeout=LONG_TIMEOUT,
+        )
 
     def ps(self) -> list[dict[str, Any]]:
         result = self._run(self.compose_args("ps", "--all", "--format", "json"), mutating=False)
