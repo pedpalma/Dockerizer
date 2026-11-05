@@ -129,6 +129,7 @@ def render_new_env(
     overrides: dict[str, dict[str, str]],
     infra_values: dict[str, str],
     secret: Callable[[], str] = generate_secret,
+    dev_identity: dict[str, str] | None = None,
 ) -> str:
     def line(var: EnvVar) -> str:
         if GENERATABLE_SECRET_RE.search(var.name):
@@ -138,6 +139,17 @@ def render_new_env(
         return f"# {var.name}=  (preencha se a aplicação precisar)"
 
     groups = _infra_group_lines(analysis, infra_values) + _app_groups(analysis, overrides, line)
+    if dev_identity:
+        groups.append(
+            EnvGroup(
+                "Desenvolvimento (seu usuário neste computador)",
+                [
+                    "# UID/GID do usuário das imagens de desenvolvimento: arquivos criados pelo",
+                    "# container no código montado continuam sendo seus.",
+                    *(f"{name}={value}" for name, value in dev_identity.items()),
+                ],
+            )
+        )
     return render("env.j2", groups=groups)
 
 

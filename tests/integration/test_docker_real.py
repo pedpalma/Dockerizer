@@ -7,6 +7,7 @@ restante, e o projeto byte a byte igual ao original.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from collections.abc import Callable
 
@@ -264,5 +265,58 @@ def test_next_standalone_image(project: Project) -> None:
     image = f"{project.compose_project}-app"
     listing = _docker("run", "--rm", "--entrypoint", "ls", image, "/app").stdout.split()
     assert "server.js" in listing and "app" not in listing  # só a saída standalone, sem o código
+    project.cli("rollback", "--yes", "--images")
+    project.assert_clean()
+
+
+def _exec(project: Project, service: str, script: str) -> str:
+    return _docker(
+        "compose", "-p", project.compose_project, "exec", "-T", service, "sh", "-c", script,
+        check=True,
+    ).stdout  # fmt: skip
+
+
+def test_dev_files_created_in_container_belong_to_host_user(project: Project) -> None:
+    """--dev: o que o container cria no código montado pertence a quem rodou o Dockerizer."""
+    project.write(FASTAPI_STACK)
+    project.cli("setup", "--yes", "--dev", "--build", "--start")
+    project.wait_healthy("app")
+    _exec(project, "app", "touch /app/criado-no-container.txt")
+    created = project.root / "criado-no-container.txt"
+    info = created.stat()
+    created.unlink()
+    assert (info.st_uid, info.st_gid) == (os.getuid(), os.getgid())
+    project.cli("down")
+    project.cli("purge", input=f"n\n{project.compose_project}\n")
+    project.cli("rollback", "--yes", "--images")
+    project.assert_clean()
+
+
+NODE_DEV_APP = {
+    "package.json": json.dumps(
+        {
+            "name": "api",
+            "private": True,
+            "scripts": {"dev": "node server.js", "start": "node server.js"},
+        }
+    ),
+    "server.js": (
+        "require('http').createServer((req, res) => res.end('ok'))"
+        ".listen(process.env.PORT || 3000);\n"
+    ),
+    # UID/GID diferentes do usuário "node" (1000) da imagem: força a recriação do usuário.
+    ".env": "DOCKERIZER_UID=1001\nDOCKERIZER_GID=1001\n",
+}
+
+
+def test_node_dev_user_is_recreated_with_requested_ids(project: Project) -> None:
+    project.write(NODE_DEV_APP)
+    project.cli("setup", "--yes", "--dev", "--build", "--start")
+    project.wait_healthy("app")
+    assert _exec(project, "app", "id -u; id -g; stat -c %u:%g /home/node").split() == [
+        "1001",
+        "1001",
+        "1001:1001",
+    ]
     project.cli("rollback", "--yes", "--images")
     project.assert_clean()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import socket
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -28,7 +29,14 @@ from dockerizer.constants import (
 from dockerizer.fs.changes import GeneratedFile, WritePolicy
 from dockerizer.fs.paths import read_text, sha256_text
 from dockerizer.generators.compose import ComposeResult, build_compose, service_names
-from dockerizer.generators.dockerfile import main_process, render_dockerfile, render_dockerignore
+from dockerizer.generators.dockerfile import (
+    DEV_GID_VAR,
+    DEV_UID_VAR,
+    main_process,
+    render_dockerfile,
+    render_dockerignore,
+    uses_dev_identity,
+)
 from dockerizer.generators.envfiles import (
     append_to_env,
     generate_secret,
@@ -314,6 +322,22 @@ def _gitignore(root: Path, extra: dict[str, set[str]] | None = None) -> Generate
     )
 
 
+def host_identity() -> dict[str, str]:
+    """UID/GID do usuário atual para as imagens de desenvolvimento.
+
+    Vazio no Windows (sem UID) e para root ou grupo root: a imagem mantém o usuário padrão sem
+    privilégios em vez de rodar a aplicação como root.
+    """
+    getuid = getattr(os, "getuid", None)
+    getgid = getattr(os, "getgid", None)
+    if getuid is None or getgid is None:
+        return {}
+    uid, gid = getuid(), getgid()
+    if uid == 0 or gid == 0:
+        return {}
+    return {DEV_UID_VAR: str(uid), DEV_GID_VAR: str(gid)}
+
+
 def build_plan(
     analysis: ProjectAnalysis,
     root: Path,
@@ -322,6 +346,7 @@ def build_plan(
     known_credentials: dict[str, str],
     secret: Callable[[], str] = generate_secret,
     publish_ip: str | None = None,
+    identity: Callable[[], dict[str, str]] | None = None,
 ) -> GenerationPlan:
     """Gera o conteúdo de todos os arquivos. Lança ``GenerationError`` se faltar informação."""
     root = root.resolve()
@@ -401,10 +426,15 @@ def build_plan(
     existing_env = read_text(env_path) if env_path.is_file() else None
     known = {**known_credentials, **parse_env_file(existing_env or "")}
     infra_values = infra_defaults(analysis, known, secret)
+    dev_env: dict[str, str] = {}
+    if any(uses_dev_identity(a, mode) for a in analysis.applications):
+        dev_env = (identity or host_identity)()
     if existing_env is None:
-        env_content = render_new_env(analysis, compose.env_overrides, infra_values, secret)
+        env_content = render_new_env(
+            analysis, compose.env_overrides, infra_values, secret, dev_identity=dev_env
+        )
     else:
-        env_content = append_to_env(existing_env, analysis, infra_values)
+        env_content = append_to_env(existing_env, analysis, {**infra_values, **dev_env})
     files.append(
         GeneratedFile(
             path=".env",

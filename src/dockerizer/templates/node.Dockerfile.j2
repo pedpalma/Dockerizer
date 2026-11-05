@@ -12,6 +12,21 @@ WORKDIR /app
 {% if corepack %}
 RUN corepack enable
 {% endif %}
+{% if dev_identity %}
+# O usuário "node" recebe o UID/GID de quem roda o Dockerizer (DOCKERIZER_UID e DOCKERIZER_GID
+# no .env): arquivos criados no código montado continuam sendo seus.
+ARG APP_UID=1000
+ARG APP_GID=1000
+# O grupo "node" é recriado com o GID pedido mesmo que ele já exista com outro nome (ex.: 20
+# no macOS), para que "node:node" continue válido no restante do Dockerfile.
+RUN if [ "$APP_UID:$APP_GID" != "1000:1000" ]; then \
+      deluser node \
+      && sed -i "/^node:/d" /etc/group \
+      && echo "node:x:$APP_GID:" >> /etc/group \
+      && adduser -D -u "$APP_UID" -G node -h /home/node -s /bin/sh node \
+      && chown -R node:node /home/node; \
+    fi
+{% endif %}
 RUN chown node:node /app
 {% if data_dirs %}
 RUN mkdir -p {{ data_dirs | map("shell_quote") | join(" ") }} \
