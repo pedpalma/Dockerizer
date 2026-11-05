@@ -24,6 +24,24 @@ funcionam sem Docker.
 
 ## Instalação
 
+Uma versão publicada (veja as [releases](https://github.com/pedpalma/Dockerizer/releases) e o
+[CHANGELOG](CHANGELOG.md)). O repositório é privado: use a sua chave SSH do GitHub ou o `gh`.
+
+```bash
+# Direto da tag, com uv (recomendado)
+uv tool install "git+ssh://git@github.com/pedpalma/Dockerizer.git@v0.1.0"
+
+# Ou com o pacote anexado à release
+gh release download v0.1.0 -R pedpalma/Dockerizer -p '*.whl' -p SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+uv tool install ./dockerizer-0.1.0-py3-none-any.whl
+
+# Atualizar para outra versão
+uv tool install --force "git+ssh://git@github.com/pedpalma/Dockerizer.git@v0.2.0"
+```
+
+A partir do código-fonte:
+
 ```bash
 # Com uv (recomendado)
 uv tool install .
@@ -55,8 +73,35 @@ Next.js standalone — e terminam conferindo que não sobrou nenhum container, v
 imagem e que o projeto ficou idêntico ao original. Cada teste usa um projeto Compose de nome
 único e limpa apenas os próprios recursos, mesmo quando falha.
 
-O CI (`.github/workflows/ci.yml`) roda lint, tipos e testes unitários em todo push e pull
-request, e a integração com Docker em seguida.
+O CI (`.github/workflows/ci.yml`) roda lint, tipos, testes unitários e um teste do pacote
+construído (wheel instalada à parte, com os templates) em todo push e pull request, e a
+integração com Docker em seguida. O Dependabot (`.github/dependabot.yml`) abre PRs semanais
+para as GitHub Actions e as dependências do `uv.lock`; as versões das imagens base usadas nos
+arquivos gerados ficam em `src/dockerizer/constants.py` e são revisadas a cada release.
+
+### Publicando uma versão
+
+A versão vem só do `pyproject.toml` (`dockerizer --version` a lê do pacote instalado).
+
+```bash
+git switch main && git pull
+uv version 0.2.0                   # atualiza o pyproject.toml e o uv.lock
+# CHANGELOG.md: renomeie "## [Não lançado]" para "## [0.2.0] - AAAA-MM-DD", crie uma seção
+# "Não lançado" vazia acima dela e atualize os links do fim do arquivo
+git commit -am "chore: versão 0.2.0"
+git tag -a v0.2.0 -m "Dockerizer 0.2.0"
+git push origin main v0.2.0
+```
+
+A tag dispara `.github/workflows/release.yml`:
+1. confere se a tag bate com a versão do `pyproject.toml` e se o CHANGELOG tem a seção;
+2. roda o CI completo (inclusive a integração com Docker);
+3. constrói wheel e sdist, confere a versão do pacote e gera `SHA256SUMS`;
+4. cria a release no GitHub com essa seção do CHANGELOG como notas e os pacotes anexados.
+   Tags com sufixo (ex.: `v0.2.0-rc.1`) viram pré-release.
+
+Se algo falhar, nada é publicado: corrija, apague a tag (`git push --delete origin v0.2.0`
+e `git tag -d v0.2.0`) e crie-a de novo.
 
 ## Tecnologias suportadas
 

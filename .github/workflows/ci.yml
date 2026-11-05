@@ -5,12 +5,14 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call: # reutilizado pelo workflow de release antes de publicar
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # Chamado pelo release, github.workflow é "Release": grupo diferente do dele (sem impasse).
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -28,6 +30,14 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run mypy src
       - run: uv run pytest
+      - name: Pacote instalável (templates incluídos)
+        run: |
+          uv build
+          uvx --from dist/*.whl dockerizer --version
+          mkdir -p /tmp/exemplo/app
+          printf 'fastapi\nuvicorn\n' > /tmp/exemplo/requirements.txt
+          printf 'from fastapi import FastAPI\napp = FastAPI()\n' > /tmp/exemplo/app/main.py
+          uvx --from dist/*.whl dockerizer setup /tmp/exemplo --yes --dry-run --diff
 
   integration:
     name: Integração com Docker real

@@ -247,3 +247,12 @@ def test_compose_project_never_reuses_directory_name(
     manifest = ManifestStore(root).load()
     assert manifest is not None and manifest.docker is not None
     assert manifest.docker.compose_project == "projeto-dockerizer"
+
+
+def test_version_comes_from_pyproject() -> None:
+    import tomllib
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    expected = tomllib.loads(pyproject.read_text())["project"]["version"]
+    code, output = run("--version")
+    assert code == 0 and output.strip() == f"dockerizer {expected}"
