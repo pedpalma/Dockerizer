@@ -1,0 +1,78 @@
+name: Release
+
+# Publica uma versão ao enviar uma tag "v<versão>" (ex.: v0.2.0). A tag precisa ser igual à
+# versão do pyproject.toml e ter uma seção no CHANGELOG.md; o CI completo (lint, tipos, testes
+# e integração com Docker) roda antes, e a release só é criada se tudo passar.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Confere tag, versão e CHANGELOG
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag igual à versão do pyproject.toml
+        run: |
+          expected="${GITHUB_REF_NAME#v}"
+          actual="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::A tag $GITHUB_REF_NAME não corresponde à versão $actual do pyproject.toml."
+            exit 1
+          fi
+          if ! grep -q "^## \[$actual\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md não tem a seção '## [$actual]'."
+            exit 1
+          fi
+
+  ci:
+    name: CI
+    needs: version
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: Publica a release no GitHub
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # criar a release e anexar os pacotes
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Constrói wheel e sdist
+        run: uv build
+      - name: Confere o pacote construído
+        run: |
+          test "$(uvx --from dist/*.whl dockerizer --version)" = "dockerizer ${GITHUB_REF_NAME#v}"
+          cd dist && sha256sum -- *.whl *.tar.gz > SHA256SUMS  # nomes sem "dist/"
+      - name: Notas da versão a partir do CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v header="## [$version]" '
+            index($0, header) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found && /^\[[^]]+\]: / { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md
+      - name: Cria a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=""
+          case "$GITHUB_REF_NAME" in *-*) flags="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "Dockerizer ${GITHUB_REF_NAME#v}" --notes-file notes.md --verify-tag $flags

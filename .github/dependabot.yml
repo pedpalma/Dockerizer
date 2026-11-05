@@ -1,0 +1,25 @@
+# Atualizações semanais das GitHub Actions e das dependências Python (uv.lock).
+# Cada PR passa pelo CI antes do merge. As imagens base usadas nos arquivos gerados
+# (src/dockerizer/constants.py) não são cobertas: revise-as a cada release.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 5
+    groups:
+      python:
+        patterns: ["*"]
