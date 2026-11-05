@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Tag igual à versão do pyproject.toml
         run: |
           expected="${GITHUB_REF_NAME#v}"
@@ -48,8 +48,8 @@ jobs:
     permissions:
       contents: write # criar a release e anexar os pacotes
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.12"
       - name: Constrói wheel e sdist
